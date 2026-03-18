@@ -1,36 +1,67 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Sistema Administrativo Desesplast
 
-## Getting Started
+Reconstruccion modular con:
 
-First, run the development server:
+- Next.js + TypeScript + App Router
+- Tailwind CSS + shadcn/ui
+- Supabase (Auth, DB, Storage, Edge Functions)
+- React Query + React Hook Form + Zod
+
+## Scripts
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run lint
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Variables de entorno
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Crear `.env.local` con:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+NEXT_PUBLIC_SITE_DISABLED=false
 
-## Learn More
+SUPABASE_SERVICE_ROLE_KEY=
+RESEND_API_KEY=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_SERVICE_ACCOUNT_JSON=
+CONVERTAPI_SECRET=
+OPENAI_API_KEY=
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Estructura principal
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `src/app`: rutas (auth, dashboard protegido, portal publico)
+- `src/components`: UI reutilizable y modulos visuales
+- `src/lib`: config, supabase clients, validaciones, tipos, server actions
+- `src/modules`: servicios por dominio
+- `supabase/migrations`: schema y RLS
+- `supabase/functions`: edge functions (procesamiento, email, drive, oauth)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Nota de despliegue
 
-## Deploy on Vercel
+Para entorno productivo se debe:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Ejecutar migraciones en Supabase.
+2. Deployar edge functions.
+3. Configurar secretos requeridos.
+4. Ajustar politicas de storage segun estrategia final de acceso del portal.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Google Drive OAuth (nuevo flujo)
+
+1. Crear un proyecto nuevo en Google Cloud Console.
+2. Habilitar Google Drive API.
+3. Crear credenciales OAuth 2.0 (Web application).
+4. Agregar como redirect URI:
+   - `https://<tu-project-ref>.supabase.co/functions/v1/google-oauth-callback`
+5. Cargar en Supabase secrets:
+   - `GOOGLE_CLIENT_ID`
+   - `GOOGLE_CLIENT_SECRET`
+
+La app abre OAuth en popup y guarda tokens por usuario en `google_oauth_tokens`,
+con refresh automatico cuando el access token esta por expirar.

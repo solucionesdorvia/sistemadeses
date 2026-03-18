@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.gitignore
+.env
+.env.*
+npm-debug.log*
+README.md
+*.md
+supabase/.branches
+supabase/.temp
+terminals
