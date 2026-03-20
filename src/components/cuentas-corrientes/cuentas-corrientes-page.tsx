@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertCircle,
   Archive,
+  CheckCircle2,
   ChevronDown,
   Download,
   Loader2,
@@ -56,6 +58,17 @@ export function CuentasCorrientesPage() {
   const queryClient = useQueryClient();
   const [companyType, setCompanyType] = useState<CompanyType>("americana");
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [uploadInputKey, setUploadInputKey] = useState(0);
+  const [uploadJobs, setUploadJobs] = useState<
+    Array<{
+      id: string;
+      companyType: CompanyType;
+      fileNames: string[];
+      status: "processing" | "completed" | "error";
+      createdAt: number;
+      errorMessage?: string;
+    }>
+  >([]);
   const [search, setSearch] = useState("");
   const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
 
@@ -86,18 +99,53 @@ export function CuentasCorrientesPage() {
     };
   }, [queryClient]);
 
-  const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedFiles.length) throw new Error("Selecciona al menos un archivo.");
-      await uploadCuentaCorrienteFiles(selectedFiles, companyType);
-    },
-    onSuccess: async () => {
-      setSelectedFiles([]);
-      toast.success("Archivos enviados para procesamiento.");
-      await queryClient.invalidateQueries({ queryKey: ["cuentas-corrientes-files"] });
-    },
-    onError: (error: Error) => toast.error(error.message),
-  });
+  const startUploadBatch = () => {
+    if (!selectedFiles.length) {
+      toast.error("Selecciona al menos un archivo.");
+      return;
+    }
+
+    const batchFiles = [...selectedFiles];
+    const batchCompany = companyType;
+    const jobId = crypto.randomUUID();
+    setSelectedFiles([]);
+    setUploadInputKey((current) => current + 1);
+    setUploadJobs((current) => [
+      {
+        id: jobId,
+        companyType: batchCompany,
+        fileNames: batchFiles.map((file) => file.name),
+        status: "processing",
+        createdAt: Date.now(),
+      },
+      ...current,
+    ]);
+
+    void (async () => {
+      try {
+        await uploadCuentaCorrienteFiles(batchFiles, batchCompany);
+        setUploadJobs((current) =>
+          current.map((job) => (job.id === jobId ? { ...job, status: "completed" } : job)),
+        );
+        toast.success(`Procesamiento iniciado para ${batchCompany}.`);
+        await queryClient.invalidateQueries({ queryKey: ["cuentas-corrientes-files"] });
+      } catch (error) {
+        setUploadJobs((current) =>
+          current.map((job) =>
+            job.id === jobId
+              ? {
+                  ...job,
+                  status: "error",
+                  errorMessage:
+                    error instanceof Error ? error.message : "No se pudo procesar el lote.",
+                }
+              : job,
+          ),
+        );
+        toast.error(error instanceof Error ? error.message : "No se pudo procesar el lote.");
+      }
+    })();
+  };
 
   const sendAllMutation = useMutation({
     mutationFn: async () => sendVendorEmails({ module: "cuentas_corrientes", sendAll: true }),
@@ -192,14 +240,36 @@ export function CuentasCorrientesPage() {
                 </SelectContent>
               </Select>
               <FileUpload
+                key={uploadInputKey}
                 accept=".xlsx,.xls"
                 onFileSelect={setSelectedFiles}
-                disabled={uploadMutation.isPending}
               />
-              <Button onClick={() => uploadMutation.mutate()} disabled={uploadMutation.isPending}>
-                {uploadMutation.isPending && <Loader2 className="size-4 animate-spin" />}
-                Procesar archivo
+              <Button onClick={startUploadBatch} disabled={selectedFiles.length === 0}>
+                Procesar {companyType}
               </Button>
+              {uploadJobs.length > 0 ? (
+                <div className="space-y-2 rounded-md border p-3">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Lotes enviados (puedes seguir cargando otras empresas)
+                  </p>
+                  {uploadJobs.slice(0, 6).map((job) => (
+                    <div
+                      key={job.id}
+                      className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium capitalize">
+                          {job.companyType} - {job.fileNames.length} archivo(s)
+                        </p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {job.fileNames.join(", ")}
+                        </p>
+                      </div>
+                      <UploadJobStatusLabel job={job} />
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </CardContent>
           </Card>
         </TabsContent>
@@ -411,6 +481,43 @@ export function CuentasCorrientesPage() {
         </TabsContent>
       </Tabs>
     </section>
+  );
+}
+
+function UploadJobStatusLabel({
+  job,
+}: {
+  job: {
+    status: "processing" | "completed" | "error";
+    errorMessage?: string;
+  };
+}) {
+  if (job.status === "processing") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-blue-600">
+        <Loader2 className="size-3 animate-spin" />
+        Procesando
+      </span>
+    );
+  }
+
+  if (job.status === "completed") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-emerald-600">
+        <CheckCircle2 className="size-3" />
+        Enviado
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-xs text-red-600"
+      title={job.errorMessage ?? "Error al procesar"}
+    >
+      <AlertCircle className="size-3" />
+      Error
+    </span>
   );
 }
 

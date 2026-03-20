@@ -3,7 +3,6 @@
 import { createClient } from "@/lib/supabase/client";
 import type { CompanyType } from "@/lib/types/domain";
 import JSZip from "jszip";
-import * as XLSX from "xlsx";
 import { invokeEdgeFunction } from "@/modules/vendors/services/edge-client-service";
 
 export async function uploadCuentaCorrienteFiles(
@@ -95,24 +94,26 @@ async function normalizeCuentaCorrienteInputFile(file: File) {
     throw new Error(`Formato no soportado: ${file.name}`);
   }
 
-  // Conversion automatica en cliente para evitar consumo alto en Edge Function.
-  const sourceBuffer = await file.arrayBuffer();
-  const workbook = XLSX.read(sourceBuffer, {
-    type: "array",
-    cellStyles: true,
-    cellNF: true,
-    cellFormula: true,
-    cellDates: true,
+  // Conversion en backend con LibreOffice para preservar formato de .xls
+  // mucho mejor que una conversion JS en navegador.
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch("/api/cuentas-corrientes/convert-xls", {
+    method: "POST",
+    body: formData,
   });
 
-  const converted = XLSX.write(workbook, {
-    type: "array",
-    bookType: "xlsx",
-    cellStyles: true,
-  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { message?: string };
+    throw new Error(payload.message ?? "No se pudo convertir .xls a .xlsx.");
+  }
 
-  const convertedName = file.name.replace(/\.xls$/i, ".xlsx");
-  return new File([converted], convertedName, {
+  const convertedBuffer = await response.arrayBuffer();
+  const convertedNameHeader = response.headers.get("X-Converted-Filename");
+  const convertedName = convertedNameHeader || file.name.replace(/\.xls$/i, ".xlsx");
+
+  return new File([convertedBuffer], convertedName, {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     lastModified: Date.now(),
   });
