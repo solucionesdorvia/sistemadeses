@@ -47,11 +47,33 @@ export async function uploadCuentaCorrienteFiles(
       uploadedPaths.push(path);
     }
 
-    // Se delega a edge function el procesamiento critico del excel.
-    await invokeEdgeFunction({
-      functionName: "process-cuentas-corrientes",
-      body: { companyType, filePaths: uploadedPaths },
-    });
+    // Procesa un archivo por invocacion para evitar agotar compute de la Edge Function.
+    // Si un archivo falla, marca error solo en ese registro y continua con el resto.
+    for (let index = 0; index < uploadedPaths.length; index += 1) {
+      const filePath = uploadedPaths[index];
+      try {
+        await invokeEdgeFunction({
+          functionName: "process-cuentas-corrientes",
+          body: {
+            companyType,
+            filePaths: [filePath],
+            skipCleanup: index > 0,
+            syncAfterProcess: false,
+          },
+        });
+      } catch (error) {
+        await supabase
+          .from("files")
+          .update({
+            status: "error",
+            error_message:
+              error instanceof Error
+                ? error.message
+                : "Error al procesar archivo en cuentas corrientes.",
+          })
+          .eq("file_path", filePath);
+      }
+    }
 
     // Conversion local opcional a PDF para vendedores con "convertToPdf = true".
     const convertResponse = await fetch("/api/cuentas-corrientes/convert-pdf", {

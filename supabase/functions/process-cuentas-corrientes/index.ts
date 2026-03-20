@@ -12,6 +12,8 @@ import {
 type RequestBody = {
   companyType: "americana" | "days" | "desesplast";
   filePaths: string[];
+  skipCleanup?: boolean;
+  syncAfterProcess?: boolean;
 };
 
 const supabase = createClient(
@@ -31,8 +33,10 @@ Deno.serve(async (request) => {
       return jsonError("No se recibieron archivos para procesar.", 400);
     }
 
-    // NOTE: Lógica destructiva intencional del sistema original.
-    await cleanupCompanyResults(userId, body.companyType);
+    // Limpieza inicial por empresa. Puede omitirse para archivos siguientes del mismo lote.
+    if (!body.skipCleanup) {
+      await cleanupCompanyResults(userId, body.companyType);
+    }
 
     const processedVendors = new Set<string>();
     const vendorIdentityMap = await loadExistingVendorIdentityMap(userId);
@@ -155,6 +159,7 @@ Deno.serve(async (request) => {
     // Google Drive es opcional. Si falla o esta desactivado, no debe romper
     // el procesamiento principal de cuentas corrientes.
     const enableDriveSync =
+      body.syncAfterProcess === true &&
       Deno.env.get("ENABLE_GOOGLE_DRIVE_SYNC")?.toLowerCase() === "true";
     if (enableDriveSync) {
       try {
