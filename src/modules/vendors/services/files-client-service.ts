@@ -58,7 +58,9 @@ export async function uploadCuentaCorrienteFiles(
           body: {
             companyType,
             filePaths: [filePath],
-            skipCleanup: index > 0,
+            // Evita limpieza global en Edge Function (costosa en compute).
+            // La actualización de archivos por vendedor se hace vía upsert.
+            skipCleanup: true,
             syncAfterProcess: false,
           },
         });
