@@ -15,6 +15,7 @@ export const runtime = "nodejs";
 
 type Body = {
   companyType?: "americana" | "days" | "desesplast";
+  vendorName?: string;
 };
 
 export async function POST(request: Request) {
@@ -57,8 +58,7 @@ export async function POST(request: Request) {
     const vendorsResult = await admin
       .from("vendors")
       .select("normalized_name,canonical_name,convert_to_pdf")
-      .eq("user_id", user.id)
-      .eq("convert_to_pdf", true);
+      .eq("user_id", user.id);
 
     if (vendorsResult.error) {
       return Response.json({ message: vendorsResult.error.message }, { status: 500 });
@@ -68,7 +68,20 @@ export async function POST(request: Request) {
     const errors: Array<{ vendor: string; file: string; reason: string }> = [];
     const companySuffix = body.companyType ? `_${body.companyType}.xlsx` : ".xlsx";
 
-    for (const vendor of vendorsResult.data ?? []) {
+    const normalizedTarget = body.vendorName?.trim().toLowerCase() ?? null;
+    const selectedVendors = (vendorsResult.data ?? []).filter((vendor) => {
+      const matchesByName = normalizedTarget
+        ? vendor.normalized_name.toLowerCase() === normalizedTarget ||
+          (vendor.canonical_name ?? "").toLowerCase() === normalizedTarget
+        : true;
+      if (!matchesByName) return false;
+
+      // Global conversion only for vendors with the PDF flag enabled.
+      // If a specific vendor is requested, allow on-demand conversion.
+      return normalizedTarget ? true : Boolean(vendor.convert_to_pdf);
+    });
+
+    for (const vendor of selectedVendors) {
       const displayName = vendor.canonical_name ?? vendor.normalized_name;
       const safeFolder = pathSafeVendorName(displayName);
       const baseFolder = `${user.id}/vendedores/${safeFolder}`;

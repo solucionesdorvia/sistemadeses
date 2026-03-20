@@ -51,6 +51,7 @@ import {
   downloadResultFile,
   downloadVendorZip,
   listVendorResultFiles,
+  triggerPdfConversion,
 } from "@/modules/vendors/services/files-client-service";
 import {
   type SendVendorEmailsResponse,
@@ -444,6 +445,35 @@ export function CuentasCorrientesPage() {
                           <RefreshCcw className="size-4" />
                         </Button>
                       ) : null}
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        title="Generar PDF vendedor"
+                        onClick={async () => {
+                          try {
+                            const response = await triggerPdfConversion({
+                              vendorName: vendor.normalizedName,
+                            });
+                            if (response.converted > 0) {
+                              toast.success(`PDF generado (${response.converted}).`);
+                            } else if (response.errors.length > 0) {
+                              toast.error(
+                                `Fallido: ${response.errors[0]?.vendor} - ${response.errors[0]?.reason ?? "Error"}`,
+                              );
+                            } else {
+                              toast.error("No se encontraron archivos para convertir.");
+                            }
+                          } catch (error) {
+                            toast.error(
+                              error instanceof Error
+                                ? error.message
+                                : "Error al generar PDF del vendedor.",
+                            );
+                          }
+                        }}
+                      >
+                        <Archive className="size-4" />
+                      </Button>
                     </div>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="border-t p-3">

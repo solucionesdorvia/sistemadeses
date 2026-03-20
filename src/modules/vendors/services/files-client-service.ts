@@ -5,6 +5,13 @@ import type { CompanyType } from "@/lib/types/domain";
 import JSZip from "jszip";
 import { invokeEdgeFunction } from "@/modules/vendors/services/edge-client-service";
 
+type ConvertPdfResponse = {
+  ok: boolean;
+  converted: number;
+  errors: Array<{ vendor: string; file: string; reason: string }>;
+  message?: string;
+};
+
 export async function uploadCuentaCorrienteFiles(
   files: File[],
   companyType: CompanyType,
@@ -58,17 +65,16 @@ export async function uploadCuentaCorrienteFiles(
     }
 
     // Conversion local opcional a PDF para vendedores con "convertToPdf = true".
-    const convertResponse = await fetch("/api/cuentas-corrientes/convert-pdf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ companyType }),
-    });
-
-    if (!convertResponse.ok) {
-      const payload = (await convertResponse.json().catch(() => ({}))) as { message?: string };
+    const convertPayload = await triggerPdfConversion({ companyType });
+    if (!convertPayload.ok) {
       console.warn(
         "[convert-pdf] No se pudo convertir a PDF, el XLSX permanece disponible:",
-        payload.message ?? convertResponse.statusText,
+        convertPayload.message ?? "Error desconocido",
+      );
+    } else if (convertPayload.errors.length > 0) {
+      console.warn(
+        "[convert-pdf] Conversion parcial con errores:",
+        convertPayload.errors.map((item) => `${item.vendor}: ${item.reason}`).join(" | "),
       );
     }
   } catch (error) {
@@ -122,6 +128,27 @@ async function normalizeCuentaCorrienteInputFile(file: File) {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     lastModified: Date.now(),
   });
+}
+
+export async function triggerPdfConversion(params: {
+  companyType?: CompanyType;
+  vendorName?: string;
+}) {
+  const convertResponse = await fetch("/api/cuentas-corrientes/convert-pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      companyType: params.companyType,
+      vendorName: params.vendorName,
+    }),
+  });
+
+  const payload = (await convertResponse.json().catch(() => ({}))) as ConvertPdfResponse;
+  if (!convertResponse.ok) {
+    throw new Error(payload.message ?? "No se pudo convertir a PDF.");
+  }
+
+  return payload;
 }
 
 export async function uploadBoletasFiles(files: File[]) {
