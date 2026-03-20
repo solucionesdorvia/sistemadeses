@@ -15,7 +15,19 @@ export function GoogleDriveConnect() {
   useEffect(() => {
     const loadState = async () => {
       const supabase = createClient();
-      const result = await supabase.from("google_oauth_tokens").select("id").limit(1);
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setConnected(false);
+        return;
+      }
+
+      const result = await supabase
+        .from("google_oauth_tokens")
+        .select("id")
+        .eq("user_id", user.id)
+        .limit(1);
       setConnected(Boolean(result.data && result.data.length > 0));
     };
     void loadState();

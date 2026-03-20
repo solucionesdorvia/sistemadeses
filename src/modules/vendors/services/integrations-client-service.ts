@@ -27,6 +27,17 @@ export async function syncGoogleDrive(vendorName?: string) {
 
 export async function disconnectGoogleDrive() {
   const supabase = createClient();
-  const result = await supabase.from("google_oauth_tokens").delete().neq("id", "");
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+  if (userError || !user) {
+    throw new Error("Sesion invalida o expirada.");
+  }
+
+  const result = await supabase
+    .from("google_oauth_tokens")
+    .delete()
+    .eq("user_id", user.id);
   if (result.error) throw new Error(result.error.message);
 }
