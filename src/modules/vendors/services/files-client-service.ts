@@ -19,7 +19,6 @@ export async function uploadCuentaCorrienteFiles(
 
   const supabase = createClient();
   const uploadedPaths: string[] = [];
-  const perFileProcessingErrors: Array<{ filePath: string; message: string }> = [];
 
   try {
     for (const originalFile of files) {
@@ -48,46 +47,14 @@ export async function uploadCuentaCorrienteFiles(
       uploadedPaths.push(path);
     }
 
-    // Procesa un archivo por invocacion para evitar agotar compute de la Edge Function.
-    // Si un archivo falla, marca error solo en ese registro y continua con el resto.
-    for (let index = 0; index < uploadedPaths.length; index += 1) {
-      const filePath = uploadedPaths[index];
-      try {
-        await invokeEdgeFunction({
-          functionName: "process-cuentas-corrientes",
-          body: {
-            companyType,
-            filePaths: [filePath],
-            // Evita limpieza global en Edge Function (costosa en compute).
-            // La actualización de archivos por vendedor se hace vía upsert.
-            skipCleanup: true,
-            syncAfterProcess: false,
-          },
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Error al procesar archivo en cuentas corrientes.";
-        perFileProcessingErrors.push({ filePath, message });
-
-        await supabase
-          .from("files")
-          .update({
-            status: "error",
-            error_message:
-              message,
-          })
-          .eq("file_path", filePath);
-      }
-    }
-
-    if (perFileProcessingErrors.length > 0) {
-      const firstError = perFileProcessingErrors[0];
-      throw new Error(
-        `${perFileProcessingErrors.length} de ${uploadedPaths.length} archivo(s) fallaron al procesar. ` +
-          `Primer error: ${firstError.message}`,
-      );
+    const processResponse = await fetch("/api/cuentas-corrientes/process", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ companyType, filePaths: uploadedPaths }),
+    });
+    if (!processResponse.ok) {
+      const payload = (await processResponse.json().catch(() => ({}))) as { message?: string };
+      throw new Error(payload.message ?? "Error al procesar cuentas corrientes.");
     }
 
     // Conversion local opcional a PDF para vendedores con "convertToPdf = true".
