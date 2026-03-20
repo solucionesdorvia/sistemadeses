@@ -19,6 +19,7 @@ export async function uploadCuentaCorrienteFiles(
 
   const supabase = createClient();
   const uploadedPaths: string[] = [];
+  const perFileProcessingErrors: Array<{ filePath: string; message: string }> = [];
 
   try {
     for (const originalFile of files) {
@@ -62,17 +63,29 @@ export async function uploadCuentaCorrienteFiles(
           },
         });
       } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Error al procesar archivo en cuentas corrientes.";
+        perFileProcessingErrors.push({ filePath, message });
+
         await supabase
           .from("files")
           .update({
             status: "error",
             error_message:
-              error instanceof Error
-                ? error.message
-                : "Error al procesar archivo en cuentas corrientes.",
+              message,
           })
           .eq("file_path", filePath);
       }
+    }
+
+    if (perFileProcessingErrors.length > 0) {
+      const firstError = perFileProcessingErrors[0];
+      throw new Error(
+        `${perFileProcessingErrors.length} de ${uploadedPaths.length} archivo(s) fallaron al procesar. ` +
+          `Primer error: ${firstError.message}`,
+      );
     }
 
     // Conversion local opcional a PDF para vendedores con "convertToPdf = true".
@@ -100,7 +113,8 @@ export async function uploadCuentaCorrienteFiles(
               ? error.message
               : "Error al invocar procesamiento de cuentas corrientes.",
         })
-        .in("file_path", uploadedPaths);
+        .in("file_path", uploadedPaths)
+        .in("status", ["pending", "processing"]);
     }
     throw error;
   }
