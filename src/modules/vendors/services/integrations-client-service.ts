@@ -3,12 +3,24 @@
 import { createClient } from "@/lib/supabase/client";
 import { invokeEdgeFunction } from "@/modules/vendors/services/edge-client-service";
 
+export type VendorEmailSendResult = {
+  vendor: string;
+  sent: boolean;
+  reason?: string;
+};
+
+export type SendVendorEmailsResponse = {
+  ok: boolean;
+  results?: VendorEmailSendResult[];
+  message?: string;
+};
+
 export async function sendVendorEmails(params: {
   module: "cuentas_corrientes" | "boletas";
   specificVendor?: string;
   sendAll?: boolean;
 }) {
-  await invokeEdgeFunction({
+  return await invokeEdgeFunction<SendVendorEmailsResponse>({
     functionName: "send-vendor-emails",
     body: {
       module: params.module,

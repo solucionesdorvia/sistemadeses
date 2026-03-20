@@ -52,7 +52,11 @@ import {
   downloadVendorZip,
   listVendorResultFiles,
 } from "@/modules/vendors/services/files-client-service";
-import { sendVendorEmails, syncGoogleDrive } from "@/modules/vendors/services/integrations-client-service";
+import {
+  type SendVendorEmailsResponse,
+  sendVendorEmails,
+  syncGoogleDrive,
+} from "@/modules/vendors/services/integrations-client-service";
 
 export function CuentasCorrientesPage() {
   const queryClient = useQueryClient();
@@ -149,7 +153,16 @@ export function CuentasCorrientesPage() {
 
   const sendAllMutation = useMutation({
     mutationFn: async () => sendVendorEmails({ module: "cuentas_corrientes", sendAll: true }),
-    onSuccess: () => toast.success("Envio global ejecutado."),
+    onSuccess: (result: SendVendorEmailsResponse) => {
+      const failed = (result.results ?? []).filter((item) => !item.sent);
+      if (failed.length === 0) {
+        toast.success(`Envio global ejecutado (${result.results?.length ?? 0} vendedor(es)).`);
+        return;
+      }
+
+      const failedNames = failed.map((item) => item.vendor).join(", ");
+      toast.error(`Fallido (${failed.length}): ${failedNames}`);
+    },
     onError: (error: Error) => toast.error(error.message),
   });
 
@@ -389,11 +402,18 @@ export function CuentasCorrientesPage() {
                         variant="ghost"
                         onClick={async () => {
                           try {
-                            await sendVendorEmails({
+                            const response = await sendVendorEmails({
                               module: "cuentas_corrientes",
                               specificVendor: vendor.normalizedName,
                             });
-                            toast.success("Email enviado.");
+                            const failed = (response.results ?? []).find((item) => !item.sent);
+                            if (failed) {
+                              toast.error(
+                                `Fallido: ${failed.vendor}${failed.reason ? ` - ${failed.reason}` : ""}`,
+                              );
+                            } else {
+                              toast.success("Email enviado.");
+                            }
                           } catch (error) {
                             toast.error(
                               error instanceof Error ? error.message : "Error al enviar email.",
