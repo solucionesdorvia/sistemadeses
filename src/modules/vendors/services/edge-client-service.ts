@@ -36,7 +36,7 @@ export async function invokeEdgeFunction<T = unknown>({
     headers: {
       "Content-Type": "application/json",
       apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
-      Authorization: `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ""}`,
+      Authorization: `Bearer ${session.access_token}`,
       "x-user-jwt": session.access_token,
     },
     body: JSON.stringify(body),
