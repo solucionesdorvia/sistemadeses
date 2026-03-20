@@ -31,20 +31,40 @@ export async function invokeEdgeFunction<T = unknown>({
   }
 
   const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/${functionName}`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
-      Authorization: `Bearer ${session.access_token}`,
-      "x-user-jwt": session.access_token,
-    },
-    body: JSON.stringify(body),
-  });
+  const invokeWithToken = async (accessToken: string) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "",
+        Authorization: `Bearer ${accessToken}`,
+        "x-user-jwt": accessToken,
+      },
+      body: JSON.stringify(body),
+    });
 
-  const payload = (await response.json().catch(() => ({}))) as {
-    message?: string;
+    const payload = (await response.json().catch(() => ({}))) as {
+      message?: string;
+    };
+    return { response, payload };
   };
+
+  let { response, payload } = await invokeWithToken(session.access_token);
+
+  const authFailed =
+    response.status === 401 ||
+    (payload.message ?? "").toLowerCase().includes("invalid jwt") ||
+    (payload.message ?? "").toLowerCase().includes("missing authorization header");
+
+  if (!response.ok && authFailed) {
+    const refreshed = await supabase.auth.refreshSession();
+    const refreshedToken = refreshed.data.session?.access_token;
+    if (refreshedToken) {
+      const retry = await invokeWithToken(refreshedToken);
+      response = retry.response;
+      payload = retry.payload;
+    }
+  }
 
   if (!response.ok) {
     if ((payload.message ?? "").toLowerCase().includes("invalid jwt")) {
