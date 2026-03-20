@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
 import { createClient as createAdminClient } from "@supabase/supabase-js";
+import JSZip from "jszip";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
 import { createClient } from "@/lib/supabase/server";
@@ -114,7 +115,8 @@ export async function POST(request: Request) {
           const localPdf = join(tempRoot, basename(file.name).replace(/\.xlsx$/i, ".pdf"));
 
           try {
-            await writeFile(localXlsx, sourceBytes);
+            const xlsxForPdf = await forceLandscapeAndFitToWidth(sourceBytes);
+            await writeFile(localXlsx, xlsxForPdf);
             await execFileAsync("soffice", [
               "--headless",
               "--convert-to",
@@ -176,4 +178,92 @@ async function hasSoffice() {
   } catch {
     return false;
   }
+}
+
+async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
+  try {
+    const zip = await JSZip.loadAsync(sourceBytes);
+    const worksheetPath = await resolveFirstWorksheetPath(zip);
+    const worksheetFile = zip.file(worksheetPath);
+    if (!worksheetFile) return sourceBytes;
+
+    let xml = await worksheetFile.async("text");
+    xml = ensureSheetPrFitToPage(xml);
+    xml = ensureLandscapePageSetup(xml);
+
+    zip.file(worksheetPath, xml);
+    return await zip.generateAsync({ type: "uint8array" });
+  } catch {
+    return sourceBytes;
+  }
+}
+
+async function resolveFirstWorksheetPath(zip: JSZip) {
+  const workbookXml = await zip.file("xl/workbook.xml")?.async("text");
+  const workbookRelsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("text");
+  if (!workbookXml || !workbookRelsXml) return "xl/worksheets/sheet1.xml";
+
+  const firstSheetMatch = workbookXml.match(/<sheet\b[^>]*r:id="([^"]+)"[^>]*>/i);
+  const firstRelId = firstSheetMatch?.[1];
+  if (!firstRelId) return "xl/worksheets/sheet1.xml";
+
+  const relRegex = new RegExp(
+    `<Relationship\\b[^>]*Id="${firstRelId}"[^>]*Target="([^"]+)"[^>]*/?>`,
+    "i",
+  );
+  const relMatch = workbookRelsXml.match(relRegex);
+  const target = relMatch?.[1];
+  if (!target) return "xl/worksheets/sheet1.xml";
+  const normalizedTarget = target.replace(/^\/+/, "");
+  return normalizedTarget.startsWith("xl/") ? normalizedTarget : `xl/${normalizedTarget}`;
+}
+
+function ensureSheetPrFitToPage(xml: string) {
+  const pageSetUpPrRegex = /<pageSetUpPr\b[^>]*\/>/;
+  if (pageSetUpPrRegex.test(xml)) {
+    return xml.replace(pageSetUpPrRegex, (tag) => upsertXmlAttr(tag, "fitToPage", "1"));
+  }
+
+  const sheetPrBlockRegex = /<sheetPr\b[^>]*>([\s\S]*?)<\/sheetPr>/;
+  if (sheetPrBlockRegex.test(xml)) {
+    return xml.replace(sheetPrBlockRegex, (block) =>
+      block.replace("</sheetPr>", '<pageSetUpPr fitToPage="1"/></sheetPr>'),
+    );
+  }
+
+  return xml.replace(/<worksheet\b[^>]*>/, (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`);
+}
+
+function ensureLandscapePageSetup(xml: string) {
+  const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
+  if (pageSetupRegex.test(xml)) {
+    return xml.replace(pageSetupRegex, (tag) => {
+      let next = tag;
+      next = upsertXmlAttr(next, "orientation", "landscape");
+      next = upsertXmlAttr(next, "fitToWidth", "1");
+      next = upsertXmlAttr(next, "fitToHeight", "0");
+      next = upsertXmlAttr(next, "paperSize", "9");
+      return next;
+    });
+  }
+
+  const insertion = '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/>';
+  if (xml.includes("</pageMargins>")) {
+    return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
+  }
+  if (xml.includes("</sheetData>")) {
+    return xml.replace("</sheetData>", `</sheetData>${insertion}`);
+  }
+  return xml.replace("</worksheet>", `${insertion}</worksheet>`);
+}
+
+function upsertXmlAttr(tag: string, attrName: string, attrValue: string) {
+  const attrRegex = new RegExp(`\\b${attrName}="[^"]*"`);
+  if (attrRegex.test(tag)) {
+    return tag.replace(attrRegex, `${attrName}="${attrValue}"`);
+  }
+  if (tag.endsWith("/>")) {
+    return tag.replace("/>", ` ${attrName}="${attrValue}"/>`);
+  }
+  return tag.replace(">", ` ${attrName}="${attrValue}">`);
 }
