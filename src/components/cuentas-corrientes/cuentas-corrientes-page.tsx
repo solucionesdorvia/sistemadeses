@@ -42,7 +42,6 @@ import { ENABLE_GOOGLE_DRIVE } from "@/lib/config/app";
 import { listCuentaCorrienteFilesAction } from "@/lib/server-actions/files-actions";
 import {
   listVendorsAction,
-  updateVendorConfigAction,
 } from "@/lib/server-actions/vendors-actions";
 import { type CompanyType, type FileRecord } from "@/lib/types/domain";
 import { uploadCuentaCorrienteFiles } from "@/modules/vendors/services/files-client-service";
@@ -721,11 +720,19 @@ function VendorConfigRow({
           size="sm"
           onClick={async () => {
             try {
-              await updateVendorConfigAction(vendor.id, {
-                email,
-                driveFolderId,
-                convertToPdf,
-              });
+              const supabase = createClient();
+              const update = await supabase
+                .from("vendors")
+                .update({
+                  email: email.trim() || null,
+                  drive_folder_id: driveFolderId.trim() || null,
+                  convert_to_pdf: convertToPdf,
+                })
+                .eq("id", vendor.id);
+
+              if (update.error) {
+                throw new Error(update.error.message);
+              }
               toast.success("Configuracion guardada.");
               await onUpdated();
             } catch (error) {
