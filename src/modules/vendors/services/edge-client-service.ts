@@ -16,6 +16,12 @@ export async function invokeEdgeFunction<T = unknown>({
     data: { session },
   } = await supabase.auth.getSession();
 
+  // Fuerza token fresco para edge functions y evita JWT stale en arranque.
+  const proactiveRefresh = await supabase.auth.refreshSession();
+  if (proactiveRefresh.data.session?.access_token) {
+    session = proactiveRefresh.data.session;
+  }
+
   if (!session?.access_token) {
     throw new Error("Sesion invalida o expirada. Inicia sesion nuevamente.");
   }
