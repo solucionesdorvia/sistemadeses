@@ -403,6 +403,27 @@ export function CuentasCorrientesPage() {
                       >
                         <Mail className="size-4" />
                       </Button>
+                      {ENABLE_GOOGLE_DRIVE ? (
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          title="Sync Drive vendedor"
+                          onClick={async () => {
+                            try {
+                              await syncGoogleDrive(vendor.normalizedName);
+                              toast.success("Sync de Drive ejecutado para vendedor.");
+                            } catch (error) {
+                              toast.error(
+                                error instanceof Error
+                                  ? error.message
+                                  : "Error al sincronizar Drive del vendedor.",
+                              );
+                            }
+                          }}
+                        >
+                          <RefreshCcw className="size-4" />
+                        </Button>
+                      ) : null}
                     </div>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="border-t p-3">
