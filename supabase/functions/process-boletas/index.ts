@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { inflate } from "npm:pako@2.1.0";
 
 import { corsHeaders } from "../_shared/cors.ts";
 import { getRequestUserId } from "../_shared/auth.ts";
@@ -42,7 +43,7 @@ Deno.serve(async (request) => {
         }
 
         const fileBuffer = new Uint8Array(await uploadResult.data.arrayBuffer());
-        const vendorNumber = await extractVendorFromPdf(fileBuffer);
+        const vendorNumber = extractVendorFromPdf(fileBuffer);
         console.log(`[process-boletas] ${filePath}: vendor=${vendorNumber ?? "null"}`);
 
         let vendorId: string | null = null;
@@ -106,7 +107,7 @@ Deno.serve(async (request) => {
   }
 });
 
-async function extractVendorFromPdf(pdfBytes: Uint8Array): Promise<string | null> {
+function extractVendorFromPdf(pdfBytes: Uint8Array): string | null {
   const rawText = new TextDecoder("latin1").decode(pdfBytes);
 
   // 1) Try each decompressed Flate stream — extract TJ text and check immediately
@@ -119,7 +120,7 @@ async function extractVendorFromPdf(pdfBytes: Uint8Array): Promise<string | null
     const compressed = latin1ToBytes(streamMatch[1]);
     if (compressed.length < 10) continue;
 
-    const inflated = await tryInflate(compressed);
+    const inflated = tryInflate(compressed);
     if (!inflated) continue;
 
     const streamText = new TextDecoder("latin1").decode(inflated);
@@ -191,35 +192,16 @@ function unescapePdf(value: string): string {
     });
 }
 
-async function tryInflate(compressed: Uint8Array): Promise<Uint8Array | null> {
-  for (const fmt of ["deflate", "deflate-raw"]) {
-    try {
-      const ds = new DecompressionStream(fmt as "deflate");
-      const writer = ds.writable.getWriter();
-      await writer.write(compressed);
-      await writer.close();
-
-      const reader = ds.readable.getReader();
-      const parts: Uint8Array[] = [];
-      let totalLen = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        parts.push(value);
-        totalLen += value.length;
-        if (totalLen > 500_000) break;
-      }
-
-      const result = new Uint8Array(totalLen);
-      let offset = 0;
-      for (const p of parts) {
-        result.set(p, offset);
-        offset += p.length;
-      }
-      return result;
-    } catch {
-      // not this format
-    }
+function tryInflate(compressed: Uint8Array): Uint8Array | null {
+  try {
+    return inflate(compressed);
+  } catch {
+    // not valid zlib/deflate
+  }
+  try {
+    return inflate(compressed.slice(2));
+  } catch {
+    // not raw deflate either
   }
   return null;
 }
