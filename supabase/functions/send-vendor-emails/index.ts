@@ -114,7 +114,7 @@ async function loadVendorAttachments(
     return loadBoletasAttachments(userId, vendorNumber);
   }
 
-  const folder = vendorName.toLowerCase().replace(/\s+/g, "-");
+  const folder = pathSafeVendorName(vendorName);
   const baseFolder = `${userId}/vendedores/${folder}`;
   const listed = await supabase.storage.from("results").list(baseFolder, { limit: 1000 });
   if (listed.error) throw new Error(listed.error.message);
@@ -176,6 +176,16 @@ function base64FromBytes(bytes: Uint8Array) {
     binary += String.fromCharCode(...chunk);
   }
   return btoa(binary);
+}
+
+function pathSafeVendorName(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9 -]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-");
 }
 
 function json(payload: unknown, status = 200) {
