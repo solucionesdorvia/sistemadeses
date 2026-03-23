@@ -1,13 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
-import pakoModule from "https://esm.sh/pako@2.1.0";
 
 import { corsHeaders } from "../_shared/cors.ts";
 import { getRequestUserId } from "../_shared/auth.ts";
-
-const pakoInflate: (data: Uint8Array) => Uint8Array =
-  typeof pakoModule.inflate === "function"
-    ? pakoModule.inflate
-    : (pakoModule as { default: { inflate: (data: Uint8Array) => Uint8Array } }).default.inflate;
 
 type RequestBody = { filePaths: string[] };
 
@@ -19,7 +13,6 @@ const supabase = createClient(
 const VENDOR_PATTERNS = [
   /cliente\s*[:#-]?\s*\d{1,12}\s+vend(?:edor)?\s*[:#-]?\s*0*([0-9]{1,8})\s+vto/i,
   /vend(?:edor)?\s*[:#-]?\s*0*([0-9]{1,8})/i,
-  /n(?:ro|ro\.|umero|úmero)?\s*vend(?:edor)?\s*[:#-]?\s*0*([0-9]{1,8})/i,
 ];
 
 Deno.serve(async (request) => {
@@ -30,6 +23,7 @@ Deno.serve(async (request) => {
   try {
     const requestUserId = await getRequestUserId(request);
     const body = (await request.json()) as RequestBody;
+    const diagnostics: string[] = [];
 
     for (const filePath of body.filePaths ?? []) {
       const fileResult = await supabase
@@ -48,8 +42,11 @@ Deno.serve(async (request) => {
         }
 
         const fileBuffer = new Uint8Array(await uploadResult.data.arrayBuffer());
-        const vendorNumber = extractVendorFromPdf(fileBuffer);
-        console.log(`[process-boletas] ${filePath}: vendor=${vendorNumber ?? "null"}`);
+        diagnostics.push(`file=${filePath} size=${fileBuffer.length}`);
+
+        const { vendorNumber, diag } = await extractVendorFromPdf(fileBuffer);
+        diagnostics.push(...diag);
+        diagnostics.push(`result=${vendorNumber ?? "null"}`);
 
         let vendorId: string | null = null;
         if (vendorNumber) {
@@ -86,13 +83,13 @@ Deno.serve(async (request) => {
           analysis_text: vendorNumber
             ? `Numero de vendedor detectado desde PDF: ${vendorNumber}`
             : null,
-          extracted_data: { vendorNumber, source: vendorNumber ? "pdf-regex" : "not-found" },
+          extracted_data: { vendorNumber, source: vendorNumber ? "pdf-regex" : "not-found", diagnostics },
           confidence_score: 0.85,
         });
 
         await supabase.from("files").update({ status: "completed" }).eq("id", fileResult.data.id);
       } catch (error) {
-        console.error(`[process-boletas] Error:`, error);
+        diagnostics.push(`error=${error instanceof Error ? error.message : "unknown"}`);
         await supabase
           .from("files")
           .update({
@@ -103,7 +100,7 @@ Deno.serve(async (request) => {
       }
     }
 
-    return json({ ok: true });
+    return json({ ok: true, diagnostics });
   } catch (error) {
     return json(
       { message: error instanceof Error ? error.message : "Error inesperado." },
@@ -112,47 +109,87 @@ Deno.serve(async (request) => {
   }
 });
 
-function extractVendorFromPdf(pdfBytes: Uint8Array): string | null {
+async function tryInflateBlob(compressed: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    const blob = new Blob([compressed]);
+    const ds = new DecompressionStream("deflate");
+    const stream = blob.stream().pipeThrough(ds);
+    const arrayBuffer = await new Response(stream).arrayBuffer();
+    return new Uint8Array(arrayBuffer);
+  } catch {
+    return null;
+  }
+}
+
+async function extractVendorFromPdf(
+  pdfBytes: Uint8Array,
+): Promise<{ vendorNumber: string | null; diag: string[] }> {
+  const diag: string[] = [];
   const rawText = new TextDecoder("latin1").decode(pdfBytes);
 
-  // 1) Try each decompressed Flate stream — extract TJ text and check immediately
+  // 1) Try each decompressed Flate stream
   const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
   let streamMatch: RegExpExecArray | null;
   let scanned = 0;
+  let inflatedCount = 0;
 
-  while ((streamMatch = streamRegex.exec(rawText)) !== null && scanned < 40) {
+  while ((streamMatch = streamRegex.exec(rawText)) !== null && scanned < 30) {
     scanned++;
     const compressed = latin1ToBytes(streamMatch[1]);
     if (compressed.length < 10) continue;
 
-    const inflated = tryInflate(compressed);
+    const inflated = await tryInflateBlob(compressed);
     if (!inflated) continue;
+    inflatedCount++;
 
     const streamText = new TextDecoder("latin1").decode(inflated);
     const textFromOps = extractTextFromOperators(streamText);
+
+    if (textFromOps.length > 0) {
+      diag.push(`stream${scanned}: ${textFromOps.length}chars "${textFromOps.slice(0, 100)}"`);
+    }
+
     const found = matchVendor(textFromOps);
-    if (found) return found;
+    if (found) {
+      diag.push(`matched_in_stream=${scanned}`);
+      return { vendorNumber: found, diag };
+    }
+
+    // Also check raw decompressed text directly
+    const foundRaw = matchVendor(streamText);
+    if (foundRaw) {
+      diag.push(`matched_raw_stream=${scanned}`);
+      return { vendorNumber: foundRaw, diag };
+    }
   }
 
-  // 2) Fallback: check TJ operators in the raw (non-decompressed) PDF
-  const rawOps = extractTextFromOperators(rawText);
-  const found = matchVendor(rawOps);
-  if (found) return found;
+  diag.push(`streams_scanned=${scanned} inflated=${inflatedCount}`);
 
-  // 3) Last resort: printable ASCII from raw bytes
-  const printable = rawText
-    .replace(/[^\x20-\x7E]/g, " ")
-    .replace(/\s+/g, " ")
-    .slice(0, 50000);
-  return matchVendor(printable);
+  // 2) Fallback: TJ operators from raw PDF
+  const rawOps = extractTextFromOperators(rawText);
+  diag.push(`raw_ops=${rawOps.length}chars`);
+  const found = matchVendor(rawOps);
+  if (found) {
+    diag.push("matched_in_raw_ops");
+    return { vendorNumber: found, diag };
+  }
+
+  // 3) Last resort: printable ASCII
+  const printable = rawText.replace(/[^\x20-\x7E]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
+  const foundPrint = matchVendor(printable);
+  if (foundPrint) {
+    diag.push("matched_in_printable");
+    return { vendorNumber: foundPrint, diag };
+  }
+
+  diag.push("no_match");
+  return { vendorNumber: null, diag };
 }
 
 function matchVendor(text: string): string | null {
   for (const pattern of VENDOR_PATTERNS) {
     const match = text.match(pattern);
-    if (match?.[1]) {
-      return stripLeadingZeros(match[1]);
-    }
+    if (match?.[1]) return stripLeadingZeros(match[1]);
   }
   return null;
 }
@@ -160,7 +197,6 @@ function matchVendor(text: string): string | null {
 function extractTextFromOperators(text: string): string {
   const lines: string[] = [];
 
-  // [(char) kern (char) kern ...] TJ
   const tjArray = /\[(.*?)\]\s*TJ/gs;
   let m: RegExpExecArray | null;
   let count = 0;
@@ -176,7 +212,6 @@ function extractTextFromOperators(text: string): string {
     if (line.trim()) lines.push(line);
   }
 
-  // (text) Tj
   const tjSingle = /\(([^()]*(?:\\.[^()]*)*)\)\s*Tj/g;
   count = 0;
   while ((m = tjSingle.exec(text)) !== null && count < 5000) {
@@ -195,20 +230,6 @@ function unescapePdf(value: string): string {
       const code = Number.parseInt(oct, 8);
       return Number.isNaN(code) ? "" : String.fromCharCode(code);
     });
-}
-
-function tryInflate(compressed: Uint8Array): Uint8Array | null {
-  try {
-    return pakoInflate(compressed);
-  } catch {
-    // not valid zlib/deflate
-  }
-  try {
-    return pakoInflate(compressed.slice(2));
-  } catch {
-    // not raw deflate either
-  }
-  return null;
 }
 
 function normalizeVendorNumber(value: string | null): string | null {
