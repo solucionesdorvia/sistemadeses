@@ -72,15 +72,11 @@ export function BoletasHistory() {
             if (!clearMutation.isPending) setIsClearDialogOpen(open);
           }}
         >
-          <AlertDialogTrigger asChild>
-            <Button
-              size="sm"
-              variant="destructive"
-              disabled={!query.data?.length}
-            >
-              <Trash2 className="size-4" />
-              Limpiar Todo
-            </Button>
+          <AlertDialogTrigger
+            render={<Button size="sm" variant="destructive" disabled={!query.data?.length} />}
+          >
+            <Trash2 className="size-4" />
+            Limpiar Todo
           </AlertDialogTrigger>
           <AlertDialogContent>
             <AlertDialogHeader>
