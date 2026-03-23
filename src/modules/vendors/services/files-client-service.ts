@@ -260,6 +260,36 @@ export async function downloadUploadedFile(path: string) {
   URL.revokeObjectURL(url);
 }
 
+export async function clearAllBoletaFiles(): Promise<{ deletedCount: number }> {
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("Sesion invalida.");
+
+  const filesResult = await supabase
+    .from("files")
+    .select("id,file_path")
+    .eq("module", "boletas");
+
+  if (filesResult.error) throw new Error(filesResult.error.message);
+  const files = filesResult.data ?? [];
+  if (files.length === 0) return { deletedCount: 0 };
+
+  const fileIds = files.map((f) => f.id);
+  const storagePaths = files.map((f) => f.file_path).filter(Boolean);
+
+  await supabase.from("boleta_analyses").delete().in("file_id", fileIds);
+
+  await supabase.from("files").delete().in("id", fileIds);
+
+  if (storagePaths.length > 0) {
+    await supabase.storage.from("uploads").remove(storagePaths);
+  }
+
+  return { deletedCount: files.length };
+}
+
 export async function clearAllVendorResultFiles() {
   try {
     return await invokeEdgeFunction<{ deletedCount: number }>({

@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Mail, UserPlus } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Mail, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import { sendVendorEmails } from "@/modules/vendors/services/integrations-client
 
 export function BoletasByVendor() {
   const [search, setSearch] = useState("");
+  const queryClient = useQueryClient();
   const vendorsQuery = useQuery({
     queryKey: ["vendors"],
     queryFn: listVendorsAction,
@@ -80,11 +81,25 @@ export function BoletasByVendor() {
 
   return (
     <div className="space-y-3">
-      <Input
-        placeholder="Buscar por vendedor o numero..."
-        value={search}
-        onChange={(event) => setSearch(event.target.value)}
-      />
+      <div className="flex gap-2">
+        <Input
+          placeholder="Buscar por vendedor o numero..."
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          className="flex-1"
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ["boletas-by-vendor"] });
+            queryClient.invalidateQueries({ queryKey: ["vendors"] });
+          }}
+        >
+          <RefreshCw className="size-4" />
+          Actualizar
+        </Button>
+      </div>
       {!filtered.length ? (
         <p className="rounded-md border p-4 text-sm text-muted-foreground">
           No hay vendedores con boletas asociadas.
@@ -112,9 +127,6 @@ export function BoletasByVendor() {
                 );
               })()}
               <div className="flex gap-2">
-                <Button size="icon" variant="outline">
-                  <UserPlus className="size-4" />
-                </Button>
                 <Button
                   size="sm"
                   onClick={async () => {
