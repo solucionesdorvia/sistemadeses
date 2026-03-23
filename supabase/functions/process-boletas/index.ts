@@ -1,5 +1,4 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
-import pako from "npm:pako@2.1.0";
 
 import { corsHeaders } from "../_shared/cors.ts";
 import { getRequestUserId } from "../_shared/auth.ts";
@@ -36,12 +35,17 @@ Deno.serve(async (request) => {
         }
 
         const fileBuffer = new Uint8Array(await uploadResult.data.arrayBuffer());
+        console.log(`[process-boletas] Processing ${filePath} (${fileBuffer.length} bytes)`);
+
         const extracted = await analyzeWithAi(
           filePath,
           fileBuffer,
           fileResult.data.original_filename ?? null,
         );
+        console.log(`[process-boletas] Extraction:`, JSON.stringify(extracted).slice(0, 500));
+
         const vendorNumber = normalizeVendorNumber(extracted.vendorNumber ?? null);
+        console.log(`[process-boletas] Vendor number: ${vendorNumber}`);
 
         let vendorId: string | null = null;
         if (vendorNumber) {
@@ -54,7 +58,6 @@ Deno.serve(async (request) => {
 
           vendorId = vendorResult.data?.id ?? null;
 
-          // Fallback: match canonically to support values like "Vend: 0036" vs "36".
           if (!vendorId) {
             const candidatesResult = await supabase
               .from("vendors")
@@ -83,6 +86,7 @@ Deno.serve(async (request) => {
 
         await supabase.from("files").update({ status: "completed" }).eq("id", fileResult.data.id);
       } catch (error) {
+        console.error(`[process-boletas] Error processing ${filePath}:`, error);
         await supabase
           .from("files")
           .update({
@@ -110,7 +114,7 @@ async function analyzeWithAi(
   pdfBytes: Uint8Array,
   originalFilename: string | null,
 ) {
-  const vendorNumberFromPdf = extractVendorNumberFromPdf(pdfBytes);
+  const vendorNumberFromPdf = await extractVendorNumberFromPdf(pdfBytes);
   if (vendorNumberFromPdf) {
     return {
       vendorNumber: vendorNumberFromPdf,
@@ -129,7 +133,7 @@ async function analyzeWithAi(
     throw new Error("OPENAI_API_KEY no configurado.");
   }
 
-  const extractedTextHint = decodePdfTextHint(pdfBytes);
+  const extractedTextHint = await decodePdfTextHint(pdfBytes);
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -173,19 +177,16 @@ function normalizeVendorNumber(value: string | null) {
   const trimmed = value.trim();
   if (!trimmed) return null;
 
-  // Prefer explicit patterns like "Vend: 0036" or "Vendedor 36".
   const explicitMatch = trimmed.match(/(?:vend(?:edor)?\.?\s*:?\s*)(\d{1,8})/i);
   if (explicitMatch?.[1]) {
     return stripLeadingZeros(explicitMatch[1]);
   }
 
-  // If the string contains exactly one numeric token, use it.
   const numberTokens = trimmed.match(/\d+/g) ?? [];
   if (numberTokens.length === 1) {
     return stripLeadingZeros(numberTokens[0]);
   }
 
-  // If it's only digits (plus separators), collapse and normalize.
   const digitsOnly = trimmed.replace(/[^\d]/g, "");
   if (digitsOnly.length > 0 && /^\D*\d[\d\D]*$/.test(trimmed)) {
     return stripLeadingZeros(digitsOnly);
@@ -198,8 +199,17 @@ function stripLeadingZeros(raw: string) {
   return raw.replace(/^0+/, "").trim() || "0";
 }
 
-function extractVendorNumberFromPdf(pdfBytes: Uint8Array) {
-  const text = decodePdfTextHint(pdfBytes);
+async function extractVendorNumberFromPdf(pdfBytes: Uint8Array) {
+  const text = await decodePdfTextHint(pdfBytes);
+
+  console.log(`[process-boletas] Extracted text length: ${text.length}`);
+  const vendIdx = text.toLowerCase().indexOf("vend");
+  if (vendIdx >= 0) {
+    console.log(`[process-boletas] Found 'vend' at ${vendIdx}: "${text.slice(Math.max(0, vendIdx - 30), vendIdx + 50)}"`);
+  } else {
+    console.log(`[process-boletas] 'vend' NOT found in extracted text`);
+  }
+
   const patterns = [
     /cliente\s*[:#-]?\s*\d{1,12}\s+vend(?:edor)?\s*[:#-]?\s*0*([0-9]{1,8})\s+vto/i,
     /vend(?:edor)?\s*[:#-]?\s*0*([0-9]{1,8})/i,
@@ -210,6 +220,7 @@ function extractVendorNumberFromPdf(pdfBytes: Uint8Array) {
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match?.[1]) {
+      console.log(`[process-boletas] Matched pattern ${pattern}, vendor: ${match[1]}`);
       return stripLeadingZeros(match[1]);
     }
   }
@@ -232,27 +243,84 @@ function extractVendorNumberFromPdf(pdfBytes: Uint8Array) {
   return null;
 }
 
-function decodePdfTextHint(pdfBytes: Uint8Array) {
-  // Extract from raw bytes and from Flate streams (common in invoice PDFs).
+async function inflateBytes(compressed: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    const ds = new DecompressionStream("deflate");
+    const writer = ds.writable.getWriter();
+    writer.write(compressed);
+    writer.close();
+
+    const reader = ds.readable.getReader();
+    const parts: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+    }
+
+    const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const part of parts) {
+      result.set(part, offset);
+      offset += part.length;
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+async function inflateRawBytes(compressed: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    const ds = new DecompressionStream("raw" as "deflate");
+    const writer = ds.writable.getWriter();
+    writer.write(compressed);
+    writer.close();
+
+    const reader = ds.readable.getReader();
+    const parts: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+    }
+
+    const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const part of parts) {
+      result.set(part, offset);
+      offset += part.length;
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+async function decodePdfTextHint(pdfBytes: Uint8Array) {
   const rawText = new TextDecoder("latin1").decode(pdfBytes);
-  const decompressedText = extractFlateStreamsText(rawText);
+  const decompressedText = await extractFlateStreamsText(rawText);
   const combined = `${rawText}\n${decompressedText}`;
   const operatorText = extractPdfTextOperators(combined);
   const literalStrings = extractPdfLiteralStrings(combined);
   const hexStrings = extractPdfHexStrings(combined);
   const printableRaw = extractPrintableAscii(rawText);
 
-  // Prefer text extracted from PDF text operators and decoded literals to reduce binary noise.
+  console.log(`[process-boletas] Text sizes - operators: ${operatorText.length}, literals: ${literalStrings.length}, hex: ${hexStrings.length}, decompressed: ${decompressedText.length}, printable: ${printableRaw.length}`);
+
   return `${operatorText}\n${literalStrings}\n${hexStrings}\n${decompressedText}\n${printableRaw}`
     .replace(/\s+/g, " ")
     .slice(0, 400000);
 }
 
-function extractFlateStreamsText(pdfLatin1: string) {
+async function extractFlateStreamsText(pdfLatin1: string) {
   const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
   let match: RegExpExecArray | null;
   const chunks: string[] = [];
   let scanned = 0;
+  let inflatedCount = 0;
 
   while ((match = streamRegex.exec(pdfLatin1)) !== null && scanned < 120) {
     scanned += 1;
@@ -260,19 +328,21 @@ function extractFlateStreamsText(pdfLatin1: string) {
     if (!streamData) continue;
 
     const compressed = latin1ToUint8Array(streamData);
-    const candidates = [compressed, compressed.slice(2)];
-    for (const candidate of candidates) {
-      if (!candidate.length) continue;
-      try {
-        const inflated = pako.inflate(candidate);
-        chunks.push(new TextDecoder("latin1").decode(inflated));
-        break;
-      } catch {
-        // Ignore non-deflated streams.
-      }
+
+    // Try zlib format (with header) first, then raw deflate
+    const inflated =
+      (await inflateBytes(compressed)) ??
+      (await inflateRawBytes(compressed)) ??
+      (await inflateBytes(compressed.slice(2))) ??
+      (await inflateRawBytes(compressed.slice(2)));
+
+    if (inflated) {
+      inflatedCount += 1;
+      chunks.push(new TextDecoder("latin1").decode(inflated));
     }
   }
 
+  console.log(`[process-boletas] Flate streams: scanned=${scanned}, inflated=${inflatedCount}`);
   return chunks.join("\n");
 }
 
@@ -320,7 +390,6 @@ function decodePdfHexString(value: string) {
     bytes[index / 2] = byteValue;
   }
 
-  // Heuristic: if many zero high-bytes, decode as UTF-16BE, else latin1.
   let zeroHighBytes = 0;
   const pairs = Math.floor(bytes.length / 2);
   for (let pairIndex = 0; pairIndex < pairs; pairIndex += 1) {
@@ -349,7 +418,6 @@ function decodePdfEscapedString(value: string) {
 function extractPdfTextOperators(text: string) {
   const chunks: string[] = [];
 
-  // Array text operators: [(A) 120 (B) <0031>] TJ
   const tjArrayPattern = /\[(.*?)\]\s*TJ/gs;
   let arrayMatch: RegExpExecArray | null;
   let arraysScanned = 0;
@@ -373,7 +441,6 @@ function extractPdfTextOperators(text: string) {
     }
   }
 
-  // Simple text operators: (Text) Tj
   const tjPattern = /\(([^()]*(?:\\.[^()]*)*)\)\s*Tj/g;
   let match: RegExpExecArray | null;
   let scanned = 0;
