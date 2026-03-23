@@ -179,10 +179,15 @@ export async function uploadBoletasFiles(files: File[]) {
     uploadedPaths.push(path);
   }
 
-  await invokeEdgeFunction({
-    functionName: "process-boletas",
-    body: { filePaths: uploadedPaths },
+  const processResponse = await fetch("/api/boletas/process", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filePaths: uploadedPaths }),
   });
+  if (!processResponse.ok) {
+    const payload = (await processResponse.json().catch(() => ({}))) as { message?: string };
+    throw new Error(payload.message ?? "Error al procesar boletas.");
+  }
 }
 
 export async function listVendorResultFiles(vendorName: string) {
