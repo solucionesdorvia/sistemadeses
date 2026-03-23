@@ -1,8 +1,13 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { inflate } from "npm:pako@2.1.0";
+import pakoModule from "https://esm.sh/pako@2.1.0";
 
 import { corsHeaders } from "../_shared/cors.ts";
 import { getRequestUserId } from "../_shared/auth.ts";
+
+const pakoInflate: (data: Uint8Array) => Uint8Array =
+  typeof pakoModule.inflate === "function"
+    ? pakoModule.inflate
+    : (pakoModule as { default: { inflate: (data: Uint8Array) => Uint8Array } }).default.inflate;
 
 type RequestBody = { filePaths: string[] };
 
@@ -194,12 +199,12 @@ function unescapePdf(value: string): string {
 
 function tryInflate(compressed: Uint8Array): Uint8Array | null {
   try {
-    return inflate(compressed);
+    return pakoInflate(compressed);
   } catch {
     // not valid zlib/deflate
   }
   try {
-    return inflate(compressed.slice(2));
+    return pakoInflate(compressed.slice(2));
   } catch {
     // not raw deflate either
   }
