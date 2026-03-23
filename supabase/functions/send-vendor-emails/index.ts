@@ -52,14 +52,17 @@ Deno.serve(async (request) => {
           continue;
         }
 
+        const isBoletas = body.module === "boletas";
+        const fileCount = `${attachments.length} archivo${attachments.length === 1 ? "" : "s"}`;
         await resend.emails.send({
           from: "cuentas@corrientes11.com",
           to: vendor.email!,
-          subject:
-            body.module === "boletas"
-              ? "Boletas disponibles"
-              : "Cuentas Corrientes actualizadas",
-          html: `<p>Adjuntamos ${attachments.length} archivo(s).</p>`,
+          subject: isBoletas
+            ? `Boletas disponibles - ${vendor.normalized_name}`
+            : `Archivos de Cuenta Corriente - ${vendor.normalized_name}`,
+          html: isBoletas
+            ? `<p>Estimado/a ${vendor.normalized_name},</p><p>Adjuntamos sus boletas (${fileCount}).</p>`
+            : `<p>Estimado/a ${vendor.normalized_name},</p><p>Adjuntamos sus archivos de cuenta corriente (${fileCount}).</p>`,
           attachments,
         });
 
