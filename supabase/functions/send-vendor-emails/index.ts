@@ -119,9 +119,14 @@ async function loadVendorAttachments(
   const listed = await supabase.storage.from("results").list(baseFolder, { limit: 1000 });
   if (listed.error) throw new Error(listed.error.message);
 
-  const filtered = (listed.data ?? []).filter((item) =>
-    convertToPdf ? item.name.endsWith(".pdf") : item.name.endsWith(".xlsx"),
-  );
+  const preferredExt = convertToPdf ? ".pdf" : ".xlsx";
+  const fallbackExt = convertToPdf ? ".xlsx" : ".pdf";
+  let filtered = (listed.data ?? []).filter((item) => item.name.endsWith(preferredExt));
+  if (filtered.length === 0) {
+    filtered = (listed.data ?? []).filter((item) =>
+      item.name.endsWith(fallbackExt),
+    );
+  }
 
   const attachments = [];
   for (const file of filtered) {
