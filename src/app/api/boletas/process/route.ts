@@ -155,7 +155,7 @@ function matchVendor(text: string): string | null {
 function extractTextFromOperators(text: string): string {
   const lines: string[] = [];
 
-  const tjArray = /\[(.*?)\]\s*TJ/gs;
+  const tjArray = new RegExp("\\[(.*?)\\]\\s*TJ", "gs");
   let m: RegExpExecArray | null;
   let count = 0;
   while ((m = tjArray.exec(text)) !== null && count < 5000) {
