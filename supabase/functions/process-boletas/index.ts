@@ -243,12 +243,16 @@ async function extractVendorNumberFromPdf(pdfBytes: Uint8Array) {
   return null;
 }
 
-async function inflateBytes(compressed: Uint8Array): Promise<Uint8Array | null> {
+async function tryDecompress(
+  compressed: Uint8Array,
+  format: string,
+): Promise<Uint8Array | null> {
   try {
-    const ds = new DecompressionStream("deflate");
+    const ds = new DecompressionStream(format as "deflate");
     const writer = ds.writable.getWriter();
-    writer.write(compressed);
-    writer.close();
+    const writePromise = writer.write(compressed);
+    const closePromise = writer.close();
+    await Promise.all([writePromise, closePromise]);
 
     const reader = ds.readable.getReader();
     const parts: Uint8Array[] = [];
@@ -271,32 +275,12 @@ async function inflateBytes(compressed: Uint8Array): Promise<Uint8Array | null> 
   }
 }
 
-async function inflateRawBytes(compressed: Uint8Array): Promise<Uint8Array | null> {
-  try {
-    const ds = new DecompressionStream("raw" as "deflate");
-    const writer = ds.writable.getWriter();
-    writer.write(compressed);
-    writer.close();
-
-    const reader = ds.readable.getReader();
-    const parts: Uint8Array[] = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      parts.push(value);
-    }
-
-    const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const part of parts) {
-      result.set(part, offset);
-      offset += part.length;
-    }
-    return result;
-  } catch {
-    return null;
-  }
+async function inflateAny(compressed: Uint8Array): Promise<Uint8Array | null> {
+  return (
+    (await tryDecompress(compressed, "deflate")) ??
+    (await tryDecompress(compressed, "deflate-raw")) ??
+    (await tryDecompress(compressed.slice(2), "deflate-raw"))
+  );
 }
 
 async function decodePdfTextHint(pdfBytes: Uint8Array) {
@@ -329,12 +313,7 @@ async function extractFlateStreamsText(pdfLatin1: string) {
 
     const compressed = latin1ToUint8Array(streamData);
 
-    // Try zlib format (with header) first, then raw deflate
-    const inflated =
-      (await inflateBytes(compressed)) ??
-      (await inflateRawBytes(compressed)) ??
-      (await inflateBytes(compressed.slice(2))) ??
-      (await inflateRawBytes(compressed.slice(2)));
+    const inflated = await inflateAny(compressed);
 
     if (inflated) {
       inflatedCount += 1;
