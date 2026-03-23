@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { inflateRawSync, inflateSync } from "node:zlib";
 
 import { corsHeaders } from "../_shared/cors.ts";
 import { getRequestUserId } from "../_shared/auth.ts";
@@ -44,7 +45,7 @@ Deno.serve(async (request) => {
         const fileBuffer = new Uint8Array(await uploadResult.data.arrayBuffer());
         diagnostics.push(`file=${filePath} size=${fileBuffer.length}`);
 
-        const { vendorNumber, diag } = await extractVendorFromPdf(fileBuffer);
+        const { vendorNumber, diag } = extractVendorFromPdf(fileBuffer);
         diagnostics.push(...diag);
         diagnostics.push(`result=${vendorNumber ?? "null"}`);
 
@@ -109,21 +110,17 @@ Deno.serve(async (request) => {
   }
 });
 
-async function tryInflateBlob(compressed: Uint8Array): Promise<Uint8Array | null> {
-  try {
-    const blob = new Blob([compressed]);
-    const ds = new DecompressionStream("deflate");
-    const stream = blob.stream().pipeThrough(ds);
-    const arrayBuffer = await new Response(stream).arrayBuffer();
-    return new Uint8Array(arrayBuffer);
-  } catch {
-    return null;
-  }
+function tryInflate(compressed: Uint8Array): Uint8Array | null {
+  // zlib format (with 2-byte header)
+  try { return new Uint8Array(inflateSync(compressed)); } catch { /* not zlib */ }
+  // raw deflate (no header)
+  try { return new Uint8Array(inflateRawSync(compressed)); } catch { /* not raw */ }
+  return null;
 }
 
-async function extractVendorFromPdf(
+function extractVendorFromPdf(
   pdfBytes: Uint8Array,
-): Promise<{ vendorNumber: string | null; diag: string[] }> {
+): { vendorNumber: string | null; diag: string[] } {
   const diag: string[] = [];
   const rawText = new TextDecoder("latin1").decode(pdfBytes);
 
@@ -138,7 +135,7 @@ async function extractVendorFromPdf(
     const compressed = latin1ToBytes(streamMatch[1]);
     if (compressed.length < 10) continue;
 
-    const inflated = await tryInflateBlob(compressed);
+    const inflated = tryInflate(compressed);
     if (!inflated) continue;
     inflatedCount++;
 
