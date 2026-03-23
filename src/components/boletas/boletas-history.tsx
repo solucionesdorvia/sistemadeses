@@ -82,8 +82,7 @@ export function BoletasHistory() {
             <AlertDialogHeader>
               <AlertDialogTitle>Limpiar todas las boletas</AlertDialogTitle>
               <AlertDialogDescription>
-                Se eliminaran todas las boletas subidas, sus analisis y archivos
-                en storage. Esta accion no se puede deshacer.
+                Se eliminaran todas las boletas. Esta accion no se puede deshacer.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
