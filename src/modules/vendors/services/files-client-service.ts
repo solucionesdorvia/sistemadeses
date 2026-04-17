@@ -105,8 +105,7 @@ async function normalizeCuentaCorrienteInputFile(file: File) {
     throw new Error(`Formato no soportado: ${file.name}`);
   }
 
-  // Conversion en backend con LibreOffice para preservar formato de .xls
-  // mucho mejor que una conversion JS en navegador.
+  // Conversion .xls -> .xlsx en servidor con SheetJS (sin LibreOffice: estable en Railway).
   const formData = new FormData();
   formData.append("file", file);
 
