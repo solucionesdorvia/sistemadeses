@@ -133,14 +133,25 @@ export async function POST(request: Request) {
               isDesesplastResultsXlsx(file.name) || body.companyType === "desesplast";
             let pdfBytes: Buffer = Buffer.from(await readFile(localPdf));
             if (desesPdfPostFit) {
+              const rawPdf = Buffer.from(pdfBytes);
               try {
-                pdfBytes = await fitDesesPdfPagesToA3Landscape(pdfBytes);
-              } catch {
                 if (await hasGhostscript()) {
-                  try {
-                    pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
-                  } catch {
-                    /* PDF de LibreOffice sin post-proceso */
+                  pdfBytes = await fitDesesPdfViaPsThenPdf(localPdf, tempRoot);
+                } else {
+                  throw new Error("sin ghostscript");
+                }
+              } catch {
+                try {
+                  pdfBytes = await fitDesesPdfPagesToA3Landscape(rawPdf);
+                } catch {
+                  if (await hasGhostscript()) {
+                    try {
+                      pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
+                    } catch {
+                      pdfBytes = rawPdf;
+                    }
+                  } else {
+                    pdfBytes = rawPdf;
                   }
                 }
               }
@@ -209,23 +220,84 @@ async function hasGhostscript() {
 }
 
 /**
- * Rearma el PDF pagina a pagina: cada hoja de LO se dibuja escalada dentro de A3 apaisado.
- * Ghostscript -dPDFFitPage no aplica a entrada PDF; esto si fuerza el ancho/alto.
+ * PDF -> PS -> PDF con PDFFitPage (solo aplica bien a PS). Encaja en A3 apaisado.
+ */
+async function fitDesesPdfViaPsThenPdf(inputPdfPath: string, tempRoot: string): Promise<Buffer> {
+  const psPath = join(tempRoot, "deses-via.ps");
+  const outPdf = join(tempRoot, "deses-fitted.pdf");
+  await execFileAsync(
+    "gs",
+    [
+      "-dNOPAUSE",
+      "-dBATCH",
+      "-dSAFER",
+      "-dQUIET",
+      "-sDEVICE=ps2write",
+      `-sOutputFile=${psPath}`,
+      inputPdfPath,
+    ],
+    {
+      timeout: 120_000,
+      maxBuffer: 80 * 1024 * 1024,
+    },
+  );
+  await execFileAsync(
+    "gs",
+    [
+      "-dNOPAUSE",
+      "-dBATCH",
+      "-dSAFER",
+      "-dQUIET",
+      "-sDEVICE=pdfwrite",
+      "-dCompatibilityLevel=1.4",
+      "-dPDFSETTINGS=/prepress",
+      "-dPDFFitPage",
+      "-dFIXEDMEDIA",
+      "-dDEVICEWIDTHPOINTS=1191",
+      "-dDEVICEHEIGHTPOINTS=842",
+      "-dAutoRotatePages=/None",
+      `-sOutputFile=${outPdf}`,
+      psPath,
+    ],
+    {
+      timeout: 120_000,
+      maxBuffer: 80 * 1024 * 1024,
+    },
+  );
+  return Buffer.from(await readFile(outPdf));
+}
+
+/**
+ * Rearma el PDF pagina a pagina (respaldo). Fudge de ancho: LO suele declarar menos ancho del que pinta.
  */
 async function fitDesesPdfPagesToA3Landscape(pdfBytes: Buffer): Promise<Buffer> {
   const targetW = 1191;
   const targetH = 842;
+  const margin = 0.88;
+  const widthFudge = 1.15;
   const src = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const out = await PDFDocument.create();
   const n = src.getPageCount();
 
   for (let i = 0; i < n; i += 1) {
-    const [embedded] = await out.embedPdf(src, [i]);
-    const pw = embedded.width;
-    const ph = embedded.height;
-    const scale = Math.min(targetW / pw, targetH / ph) * 0.98;
-    const drawW = pw * scale;
-    const drawH = ph * scale;
+    const srcPage = src.getPages()[i];
+    let baseW = srcPage.getWidth();
+    let baseH = srcPage.getHeight();
+    const rot = srcPage.getRotation().angle;
+    if (rot === 90 || rot === 270) {
+      const t = baseW;
+      baseW = baseH;
+      baseH = t;
+    }
+
+    const embedded = await out.embedPage(srcPage);
+    const ew = embedded.width;
+    const eh = embedded.height;
+    const effW = Math.max(ew, baseW) * widthFudge;
+    const effH = Math.max(eh, baseH);
+    const scale = Math.min((targetW * margin) / effW, (targetH * margin) / effH);
+    const drawW = ew * scale;
+    const drawH = eh * scale;
     const x = (targetW - drawW) / 2;
     const y = (targetH - drawH) / 2;
     const page = out.addPage([targetW, targetH]);
@@ -240,7 +312,7 @@ async function fitDesesPdfPagesToA3Landscape(pdfBytes: Buffer): Promise<Buffer> 
   return Buffer.from(await out.save());
 }
 
-/** Respaldo: GS (PDFFitPage en muchas versiones no escala PDF->PDF; puede no hacer nada util). */
+/** Respaldo: GS directo sobre PDF (PDFFitPage suele no aplicar). */
 async function fitPdfToA3LandscapeWithGhostscript(
   inputPdfPath: string,
   tempRoot: string,
