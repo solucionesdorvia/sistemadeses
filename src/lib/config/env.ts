@@ -13,6 +13,8 @@ const serverEnvSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   CONVERTAPI_SECRET: z.string().optional(),
+  /** Si es "1"/"true"/"yes", fuerza apaisado + fit-to-width al generar PDF (comportamiento viejo). */
+  CONVERT_PDF_FORCE_LANDSCAPE_FIT: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 });
 
@@ -42,6 +44,7 @@ export function getServerEnv() {
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
     GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
     CONVERTAPI_SECRET: process.env.CONVERTAPI_SECRET,
+    CONVERT_PDF_FORCE_LANDSCAPE_FIT: process.env.CONVERT_PDF_FORCE_LANDSCAPE_FIT,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   });
 }

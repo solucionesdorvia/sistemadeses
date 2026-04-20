@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { createClient as createAdminClient } from "@supabase/supabase-js";
@@ -43,7 +44,9 @@ export async function POST(request: Request) {
 
     const body = (await request.json().catch(() => ({}))) as Body;
     const { NEXT_PUBLIC_SUPABASE_URL } = getClientEnv();
-    const { SUPABASE_SERVICE_ROLE_KEY } = getServerEnv();
+    const serverEnv = getServerEnv();
+    const { SUPABASE_SERVICE_ROLE_KEY } = serverEnv;
+    const forceLandscapePdf = isTruthyEnvFlag(serverEnv.CONVERT_PDF_FORCE_LANDSCAPE_FIT);
 
     if (!SUPABASE_SERVICE_ROLE_KEY) {
       return Response.json(
@@ -115,16 +118,37 @@ export async function POST(request: Request) {
           const localPdf = join(tempRoot, basename(file.name).replace(/\.xlsx$/i, ".pdf"));
 
           try {
-            const xlsxForPdf = await forceLandscapeAndFitToWidth(sourceBytes);
+            const xlsxForPdf = forceLandscapePdf
+              ? await forceLandscapeAndFitToWidth(sourceBytes)
+              : sourceBytes;
             await writeFile(localXlsx, xlsxForPdf);
-            await execFileAsync("soffice", [
-              "--headless",
-              "--convert-to",
-              "pdf",
-              "--outdir",
-              tempRoot,
-              localXlsx,
-            ]);
+            const profileDir = join(tempRoot, "lo-profile");
+            const userInstallation = pathToFileURL(profileDir).href;
+            await execFileAsync(
+              "soffice",
+              [
+                "--headless",
+                "--norestore",
+                "--nologo",
+                "--nofirststartwizard",
+                `-env:UserInstallation=${userInstallation}`,
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                tempRoot,
+                localXlsx,
+              ],
+              {
+                env: {
+                  ...process.env,
+                  HOME: tempRoot,
+                  SAL_USE_VCLPLUGIN: "headless",
+                  LANG: process.env.LANG ?? "C.UTF-8",
+                },
+                timeout: 120_000,
+                maxBuffer: 50 * 1024 * 1024,
+              },
+            );
             const pdfBytes = await readFile(localPdf);
             const pdfPath = filePath.replace(/\.xlsx$/i, ".pdf");
             const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {
@@ -178,6 +202,12 @@ async function hasSoffice() {
   } catch {
     return false;
   }
+}
+
+function isTruthyEnvFlag(value: string | undefined) {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
 async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
