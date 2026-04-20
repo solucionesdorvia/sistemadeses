@@ -128,7 +128,16 @@ export async function POST(request: Request) {
             });
             await writeFile(localXlsx, xlsxForPdf);
             await runLibreOfficePdfConversion(localXlsx, tempRoot);
-            const pdfBytes = await readFile(localPdf);
+            const desesPdfPostFit =
+              isDesesplastResultsXlsx(file.name) || body.companyType === "desesplast";
+            let pdfBytes: Buffer = Buffer.from(await readFile(localPdf));
+            if (desesPdfPostFit && (await hasGhostscript())) {
+              try {
+                pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
+              } catch {
+                /* PDF de LibreOffice sin post-proceso */
+              }
+            }
             const pdfPath = filePath.replace(/\.xlsx$/i, ".pdf");
             const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {
               upsert: true,
@@ -181,6 +190,47 @@ async function hasSoffice() {
   } catch {
     return false;
   }
+}
+
+async function hasGhostscript() {
+  try {
+    await execFileAsync("which", ["gs"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A3 apaisado en puntos (~420×297 mm). PDFFitPage escala cada pagina para que quepa (LO ignora fit OOXML en muchos .xls). */
+async function fitPdfToA3LandscapeWithGhostscript(
+  inputPdfPath: string,
+  tempRoot: string,
+) {
+  const outPath = join(tempRoot, "fitted-a3l.pdf");
+  await execFileAsync(
+    "gs",
+    [
+      "-o",
+      outPath,
+      "-sDEVICE=pdfwrite",
+      "-dCompatibilityLevel=1.4",
+      "-dPDFSETTINGS=/prepress",
+      "-dNOPAUSE",
+      "-dBATCH",
+      "-dSAFER",
+      "-dQUIET",
+      "-dPDFFitPage",
+      "-dFIXEDMEDIA",
+      "-dDEVICEWIDTHPOINTS=1191",
+      "-dDEVICEHEIGHTPOINTS=842",
+      inputPdfPath,
+    ],
+    {
+      timeout: 120_000,
+      maxBuffer: 50 * 1024 * 1024,
+    },
+  );
+  return Buffer.from(await readFile(outPath));
 }
 
 function isTruthyEnvFlag(value: string | undefined) {
