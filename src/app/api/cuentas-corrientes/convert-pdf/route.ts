@@ -219,11 +219,13 @@ async function buildXlsxBytesForPdf(params: {
     return forceLandscapeAndFitToWidth(sourceBytes);
   }
 
-  const skipPrintPatch =
+  const isDesesplast =
     requestCompanyType === "desesplast" || isDesesplastResultsXlsx(fileName);
 
-  if (skipPrintPatch) {
-    return sourceBytes;
+  if (isDesesplast) {
+    // Hoja apaisada + fit ancho (misma logica que CONVERT_PDF_FORCE_LANDSCAPE_FIT);
+    // el XLSX crudo se salia del ancho; sin el filtro JSON de LO que rompia en Docker.
+    return forceLandscapeAndFitToWidth(sourceBytes);
   }
 
   return naturalScalePrintForPdf(sourceBytes, printScalePercent);
