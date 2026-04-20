@@ -47,6 +47,7 @@ export async function POST(request: Request) {
     const serverEnv = getServerEnv();
     const { SUPABASE_SERVICE_ROLE_KEY } = serverEnv;
     const forceLandscapePdf = isTruthyEnvFlag(serverEnv.CONVERT_PDF_FORCE_LANDSCAPE_FIT);
+    const printScalePercent = parsePrintScalePercent(serverEnv.CONVERT_PDF_PRINT_SCALE);
 
     if (!SUPABASE_SERVICE_ROLE_KEY) {
       return Response.json(
@@ -120,7 +121,7 @@ export async function POST(request: Request) {
           try {
             const xlsxForPdf = forceLandscapePdf
               ? await forceLandscapeAndFitToWidth(sourceBytes)
-              : sourceBytes;
+              : await naturalScalePrintForPdf(sourceBytes, printScalePercent);
             await writeFile(localXlsx, xlsxForPdf);
             const profileDir = join(tempRoot, "lo-profile");
             const userInstallation = pathToFileURL(profileDir).href;
@@ -133,7 +134,8 @@ export async function POST(request: Request) {
                 "--nofirststartwizard",
                 `-env:UserInstallation=${userInstallation}`,
                 "--convert-to",
-                "pdf",
+                // SinglePageSheets=true encoge toda la hoja en UNA pagina (ilegible). Forzar false (formato LO 7.6+).
+                'pdf:calc_pdf_Export:{"SinglePageSheets":{"type":"boolean","value":"false"}}',
                 "--outdir",
                 tempRoot,
                 localXlsx,
@@ -208,6 +210,85 @@ function isTruthyEnvFlag(value: string | undefined) {
   if (!value) return false;
   const normalized = value.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function parsePrintScalePercent(raw: string | undefined) {
+  if (!raw?.trim()) return 100;
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n)) return 100;
+  return Math.min(400, Math.max(10, n));
+}
+
+/**
+ * Desactiva "ajustar hoja a N paginas" (encoge todo) y usa escala % para que el PDF no salga minúsculo.
+ */
+async function naturalScalePrintForPdf(sourceBytes: Uint8Array, scalePercent: number) {
+  try {
+    const zip = await JSZip.loadAsync(sourceBytes);
+    const worksheetPath = await resolveFirstWorksheetPath(zip);
+    const worksheetFile = zip.file(worksheetPath);
+    if (!worksheetFile) return sourceBytes;
+
+    let xml = await worksheetFile.async("text");
+    xml = ensureSheetPrNoFitToPage(xml);
+    xml = ensurePageSetupNaturalScale(xml, scalePercent);
+
+    zip.file(worksheetPath, xml);
+    return await zip.generateAsync({ type: "uint8array" });
+  } catch {
+    return sourceBytes;
+  }
+}
+
+function ensureSheetPrNoFitToPage(xml: string) {
+  const pageSetUpPrRegex = /<pageSetUpPr\b[^>]*\/>/;
+  if (pageSetUpPrRegex.test(xml)) {
+    return xml.replace(pageSetUpPrRegex, (tag) => upsertXmlAttr(tag, "fitToPage", "0"));
+  }
+
+  const sheetPrBlockRegex = /<sheetPr\b[^>]*>([\s\S]*?)<\/sheetPr>/;
+  if (sheetPrBlockRegex.test(xml)) {
+    return xml.replace(sheetPrBlockRegex, (block) => {
+      if (/<pageSetUpPr\b/.test(block)) {
+        return block.replace(/<pageSetUpPr\b[^>]*\/>/, (tag) =>
+          upsertXmlAttr(tag, "fitToPage", "0"),
+        );
+      }
+      return block.replace("</sheetPr>", '<pageSetUpPr fitToPage="0"/></sheetPr>');
+    });
+  }
+
+  return xml.replace(
+    /<worksheet\b[^>]*>/,
+    (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="0"/></sheetPr>`,
+  );
+}
+
+function ensurePageSetupNaturalScale(xml: string, scalePercent: number) {
+  const scaleStr = String(scalePercent);
+  const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
+  if (pageSetupRegex.test(xml)) {
+    return xml.replace(pageSetupRegex, (tag) => {
+      let next = stripFitToPageAttrs(tag);
+      next = upsertXmlAttr(next, "scale", scaleStr);
+      return next;
+    });
+  }
+
+  const insertion = `<pageSetup scale="${scaleStr}"/>`;
+  if (xml.includes("</pageMargins>")) {
+    return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
+  }
+  if (xml.includes("</sheetData>")) {
+    return xml.replace("</sheetData>", `</sheetData>${insertion}`);
+  }
+  return xml.replace("</worksheet>", `${insertion}</worksheet>`);
+}
+
+function stripFitToPageAttrs(tag: string) {
+  return tag
+    .replace(/\s+fitToWidth="[^"]*"/gi, "")
+    .replace(/\s+fitToHeight="[^"]*"/gi, "");
 }
 
 async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
