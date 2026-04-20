@@ -176,16 +176,54 @@ async function getGoogleAccessToken(userId: string) {
     }),
   });
 
-  if (!refresh.ok) {
-    throw new Error(`No se pudo refrescar token de Google (${refresh.status}).`);
+  const rawBody = await refresh.text();
+  let tokenPayload: {
+    access_token?: string;
+    expires_in?: number;
+    scope?: string;
+    token_type?: string;
+    error?: string;
+    error_description?: string;
+  } = {};
+  try {
+    tokenPayload = JSON.parse(rawBody) as typeof tokenPayload;
+  } catch {
+    /* cuerpo no JSON */
   }
 
-  const payload = (await refresh.json()) as {
+  if (!refresh.ok) {
+    const code = tokenPayload.error ?? "error_desconocido";
+    const desc = tokenPayload.error_description
+      ? ` ${tokenPayload.error_description}`
+      : rawBody && !tokenPayload.error
+        ? ` ${rawBody.slice(0, 280)}`
+        : "";
+
+    if (code === "invalid_grant") {
+      await supabase.from("google_oauth_tokens").delete().eq("user_id", userId);
+    }
+
+    const hint =
+      code === "invalid_grant"
+        ? " Vuelve a conectar Google Drive (el acceso caduco o fue revocado)."
+        : code === "invalid_client"
+          ? " Revisa que GOOGLE_CLIENT_ID y GOOGLE_CLIENT_SECRET en Supabase (secrets de Edge Functions) coincidan con Google Cloud Console."
+          : "";
+
+    throw new Error(
+      `No se pudo refrescar token de Google (${refresh.status}): ${code}.${desc}${hint}`,
+    );
+  }
+
+  const payload = tokenPayload as {
     access_token: string;
     expires_in?: number;
     scope?: string;
     token_type?: string;
   };
+  if (!payload.access_token) {
+    throw new Error("Google no devolvio access_token al refrescar.");
+  }
 
   const newExpiresAt = payload.expires_in
     ? new Date(Date.now() + payload.expires_in * 1000).toISOString()

@@ -42,17 +42,35 @@ Deno.serve(async (request) => {
       }),
     });
 
-    if (!tokenResult.ok) {
-      throw new Error(`No se pudo obtener token de Google (${tokenResult.status}).`);
-    }
-
-    const tokenPayload = (await tokenResult.json()) as {
-      access_token: string;
+    const tokenRaw = await tokenResult.text();
+    let tokenPayload: {
+      access_token?: string;
       refresh_token?: string;
       token_type?: string;
       expires_in?: number;
       scope?: string;
-    };
+      error?: string;
+      error_description?: string;
+    } = {};
+    try {
+      tokenPayload = JSON.parse(tokenRaw) as typeof tokenPayload;
+    } catch {
+      /* ignore */
+    }
+
+    if (!tokenResult.ok) {
+      const code = tokenPayload.error ?? "error_desconocido";
+      const desc = tokenPayload.error_description
+        ? ` ${tokenPayload.error_description}`
+        : tokenRaw && !tokenPayload.error
+          ? ` ${tokenRaw.slice(0, 280)}`
+          : "";
+      throw new Error(`No se pudo obtener token de Google (${tokenResult.status}): ${code}.${desc}`);
+    }
+
+    if (!tokenPayload.access_token) {
+      throw new Error("Google no devolvio access_token.");
+    }
 
     const stateRow = await supabase
       .from("google_oauth_states")
