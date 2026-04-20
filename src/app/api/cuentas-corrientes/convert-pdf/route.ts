@@ -119,38 +119,15 @@ export async function POST(request: Request) {
           const localPdf = join(tempRoot, basename(file.name).replace(/\.xlsx$/i, ".pdf"));
 
           try {
-            const xlsxForPdf = forceLandscapePdf
-              ? await forceLandscapeAndFitToWidth(sourceBytes)
-              : await naturalScalePrintForPdf(sourceBytes, printScalePercent);
+            const xlsxForPdf = await buildXlsxBytesForPdf({
+              sourceBytes,
+              fileName: file.name,
+              requestCompanyType: body.companyType,
+              forceLandscapePdf,
+              printScalePercent,
+            });
             await writeFile(localXlsx, xlsxForPdf);
-            const profileDir = join(tempRoot, "lo-profile");
-            const userInstallation = pathToFileURL(profileDir).href;
-            await execFileAsync(
-              "soffice",
-              [
-                "--headless",
-                "--norestore",
-                "--nologo",
-                "--nofirststartwizard",
-                `-env:UserInstallation=${userInstallation}`,
-                "--convert-to",
-                // SinglePageSheets=true encoge toda la hoja en UNA pagina (ilegible). Forzar false (formato LO 7.6+).
-                'pdf:calc_pdf_Export:{"SinglePageSheets":{"type":"boolean","value":"false"}}',
-                "--outdir",
-                tempRoot,
-                localXlsx,
-              ],
-              {
-                env: {
-                  ...process.env,
-                  HOME: tempRoot,
-                  SAL_USE_VCLPLUGIN: "headless",
-                  LANG: process.env.LANG ?? "C.UTF-8",
-                },
-                timeout: 120_000,
-                maxBuffer: 50 * 1024 * 1024,
-              },
-            );
+            await runLibreOfficePdfConversion(localXlsx, tempRoot);
             const pdfBytes = await readFile(localPdf);
             const pdfPath = filePath.replace(/\.xlsx$/i, ".pdf");
             const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {
@@ -217,6 +194,69 @@ function parsePrintScalePercent(raw: string | undefined) {
   const n = Number.parseInt(raw.trim(), 10);
   if (!Number.isFinite(n)) return 100;
   return Math.min(400, Math.max(10, n));
+}
+
+function isDesesplastResultsXlsx(fileName: string) {
+  return fileName.toLowerCase().endsWith("_desesplast.xlsx");
+}
+
+async function buildXlsxBytesForPdf(params: {
+  sourceBytes: Uint8Array;
+  fileName: string;
+  requestCompanyType: Body["companyType"];
+  forceLandscapePdf: boolean;
+  printScalePercent: number;
+}): Promise<Uint8Array> {
+  const {
+    sourceBytes,
+    fileName,
+    requestCompanyType,
+    forceLandscapePdf,
+    printScalePercent,
+  } = params;
+
+  if (forceLandscapePdf) {
+    return forceLandscapeAndFitToWidth(sourceBytes);
+  }
+
+  const skipPrintPatch =
+    requestCompanyType === "desesplast" || isDesesplastResultsXlsx(fileName);
+
+  if (skipPrintPatch) {
+    return sourceBytes;
+  }
+
+  return naturalScalePrintForPdf(sourceBytes, printScalePercent);
+}
+
+async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) {
+  const profileDir = join(tempRoot, "lo-profile");
+  const userInstallation = pathToFileURL(profileDir).href;
+  await execFileAsync(
+    "soffice",
+    [
+      "--headless",
+      "--norestore",
+      "--nologo",
+      "--nofirststartwizard",
+      `-env:UserInstallation=${userInstallation}`,
+      "--convert-to",
+      "pdf",
+      "--outdir",
+      tempRoot,
+      localXlsx,
+    ],
+    {
+      env: {
+        ...process.env,
+        HOME: tempRoot,
+        SAL_USE_VCLPLUGIN: "headless",
+        LANG: process.env.LANG ?? "C.UTF-8",
+      },
+      timeout: 120_000,
+      maxBuffer: 50 * 1024 * 1024,
+    },
+  );
 }
 
 /**
