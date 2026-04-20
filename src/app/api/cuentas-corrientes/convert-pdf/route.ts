@@ -223,9 +223,7 @@ async function buildXlsxBytesForPdf(params: {
     requestCompanyType === "desesplast" || isDesesplastResultsXlsx(fileName);
 
   if (isDesesplast) {
-    // Hoja apaisada + fit ancho (misma logica que CONVERT_PDF_FORCE_LANDSCAPE_FIT);
-    // el XLSX crudo se salia del ancho; sin el filtro JSON de LO que rompia en Docker.
-    return forceLandscapeAndFitToWidth(sourceBytes);
+    return prepareDesesplastWorkbookForPdf(sourceBytes);
   }
 
   return naturalScalePrintForPdf(sourceBytes, printScalePercent);
@@ -408,6 +406,85 @@ function ensureLandscapePageSetup(xml: string) {
     return xml.replace("</sheetData>", `</sheetData>${insertion}`);
   }
   return xml.replace("</worksheet>", `${insertion}</worksheet>`);
+}
+
+function listWorksheetXmlPaths(zip: JSZip) {
+  return Object.keys(zip.files)
+    .filter((p) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(p) && !zip.files[p].dir)
+    .sort((a, b) => {
+      const na = Number.parseInt(a.match(/sheet(\d+)\.xml/i)?.[1] ?? "0", 10);
+      const nb = Number.parseInt(b.match(/sheet(\d+)\.xml/i)?.[1] ?? "0", 10);
+      return na - nb;
+    });
+}
+
+function stripScaleFromPageSetupTag(tag: string) {
+  return tag.replace(/\s+scale="[^"]*"/gi, "");
+}
+
+function tightenPageMarginsForPdf(xml: string) {
+  const marginTag =
+    '<pageMargins left="0.15" right="0.15" top="0.25" bottom="0.25" header="0.15" footer="0.15"/>';
+  const re = /<pageMargins\b[^>]*\/>/;
+  if (re.test(xml)) {
+    return xml.replace(re, marginTag);
+  }
+  if (xml.includes("</sheetData>")) {
+    return xml.replace("</sheetData>", `</sheetData>${marginTag}`);
+  }
+  return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
+}
+
+/** A3 apaisado + 1 pagina de ancho: mas area util que A4; quita scale para que LO aplique fit. */
+function ensureLandscapePageSetupDeses(xml: string) {
+  const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
+  if (pageSetupRegex.test(xml)) {
+    return xml.replace(pageSetupRegex, (tag) => {
+      let next = stripFitToPageAttrs(tag);
+      next = stripScaleFromPageSetupTag(next);
+      next = upsertXmlAttr(next, "orientation", "landscape");
+      next = upsertXmlAttr(next, "fitToWidth", "1");
+      next = upsertXmlAttr(next, "fitToHeight", "0");
+      next = upsertXmlAttr(next, "paperSize", "8");
+      return next;
+    });
+  }
+
+  const insertion =
+    '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="8"/>';
+  const marginSelfClosing = /<pageMargins\b[^>]*\/>/;
+  if (marginSelfClosing.test(xml)) {
+    return xml.replace(marginSelfClosing, (m) => `${m}${insertion}`);
+  }
+  if (xml.includes("</sheetData>")) {
+    return xml.replace("</sheetData>", `</sheetData>${insertion}`);
+  }
+  return xml.replace("</worksheet>", `${insertion}</worksheet>`);
+}
+
+function desesplastPrepareWorksheetXml(xml: string) {
+  let out = tightenPageMarginsForPdf(xml);
+  out = ensureSheetPrFitToPage(out);
+  out = ensureLandscapePageSetupDeses(out);
+  return out;
+}
+
+async function prepareDesesplastWorkbookForPdf(sourceBytes: Uint8Array) {
+  try {
+    const zip = await JSZip.loadAsync(sourceBytes);
+    const paths = listWorksheetXmlPaths(zip);
+    if (paths.length === 0) return sourceBytes;
+
+    for (const path of paths) {
+      const entry = zip.file(path);
+      if (!entry) continue;
+      const xml = await entry.async("text");
+      zip.file(path, desesplastPrepareWorksheetXml(xml));
+    }
+    return await zip.generateAsync({ type: "uint8array" });
+  } catch {
+    return sourceBytes;
+  }
 }
 
 function upsertXmlAttr(tag: string, attrName: string, attrValue: string) {
