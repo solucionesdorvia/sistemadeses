@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,7 +7,6 @@ import { promisify } from "node:util";
 
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 import JSZip from "jszip";
-import { PDFDocument } from "pdf-lib";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
 import { createClient } from "@/lib/supabase/server";
@@ -129,40 +128,18 @@ export async function POST(request: Request) {
             });
             await writeFile(localXlsx, xlsxForPdf);
             await runLibreOfficePdfConversion(localXlsx, tempRoot);
-            const desesPdfPostFit =
-              isDesesplastResultsXlsx(file.name) || body.companyType === "desesplast";
-            let pdfBytes: Buffer = Buffer.from(await readFile(localPdf));
-            if (desesPdfPostFit) {
-              const rawPdf = Buffer.from(pdfBytes);
-              try {
-                if (await hasPdftoppm()) {
-                  pdfBytes = await fitDesesPdfRasterToA3Landscape(localPdf, tempRoot);
-                } else {
-                  throw new Error("sin pdftoppm");
-                }
-              } catch {
-                try {
-                  if (await hasGhostscript()) {
-                    pdfBytes = await fitDesesPdfViaPsThenPdf(localPdf, tempRoot);
-                  } else {
-                    throw new Error("sin ghostscript");
-                  }
-                } catch {
-                  try {
-                    pdfBytes = await fitDesesPdfPagesToA3Landscape(rawPdf);
-                  } catch {
-                    if (await hasGhostscript()) {
-                      try {
-                        pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
-                      } catch {
-                        pdfBytes = rawPdf;
-                      }
-                    } else {
-                      pdfBytes = rawPdf;
-                    }
-                  }
-                }
-              }
+            let pdfBytes: Buffer;
+            try {
+              pdfBytes = Buffer.from(await readFile(localPdf));
+            } catch (err) {
+              const code = err && typeof err === "object" && "code" in err ? String((err as NodeJS.ErrnoException).code) : "";
+              throw new Error(
+                code === "ENOENT"
+                  ? "LibreOffice no genero el PDF (archivo .pdf ausente tras la conversion)."
+                  : err instanceof Error
+                    ? err.message
+                    : "No se pudo leer el PDF generado.",
+              );
             }
             const pdfPath = filePath.replace(/\.xlsx$/i, ".pdf");
             const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {
@@ -216,202 +193,6 @@ async function hasSoffice() {
   } catch {
     return false;
   }
-}
-
-async function hasGhostscript() {
-  try {
-    await execFileAsync("which", ["gs"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function hasPdftoppm() {
-  try {
-    await execFileAsync("which", ["pdftoppm"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Rasteriza cada pagina (Poppler) y la vuelve a PDF encajada en A3 apaisado.
- * Garantiza que nada se salga del ancho/alto: es imagen escalada (no texto seleccionable).
- */
-async function fitDesesPdfRasterToA3Landscape(
-  inputPdfPath: string,
-  tempRoot: string,
-): Promise<Buffer> {
-  const outPrefix = join(tempRoot, "dscan");
-  await execFileAsync(
-    "pdftoppm",
-    ["-png", "-r", "144", "-scale-to", "4000", inputPdfPath, outPrefix],
-    {
-      timeout: 300_000,
-      maxBuffer: 4 * 1024 * 1024,
-    },
-  );
-
-  const entries = await readdir(tempRoot);
-  const pngNames = entries
-    .filter((f) => /^dscan-\d+\.png$/i.test(f))
-    .sort((a, b) => {
-      const na = Number.parseInt(a.match(/(\d+)/)?.[1] ?? "0", 10);
-      const nb = Number.parseInt(b.match(/(\d+)/)?.[1] ?? "0", 10);
-      return na - nb;
-    });
-
-  if (pngNames.length === 0) {
-    throw new Error("pdftoppm no genero PNG.");
-  }
-
-  const targetW = 1191;
-  const targetH = 842;
-  const boxW = targetW * 0.98;
-  const boxH = targetH * 0.98;
-  const outPdf = await PDFDocument.create();
-
-  for (const name of pngNames) {
-    const pngBytes = await readFile(join(tempRoot, name));
-    const pngImage = await outPdf.embedPng(pngBytes);
-    const { width: dw, height: dh } = pngImage.scaleToFit(boxW, boxH);
-    const page = outPdf.addPage([targetW, targetH]);
-    page.drawImage(pngImage, {
-      x: (targetW - dw) / 2,
-      y: (targetH - dh) / 2,
-      width: dw,
-      height: dh,
-    });
-  }
-
-  return Buffer.from(await outPdf.save());
-}
-
-/**
- * PDF -> PS -> PDF con PDFFitPage (solo aplica bien a PS). Encaja en A3 apaisado.
- */
-async function fitDesesPdfViaPsThenPdf(inputPdfPath: string, tempRoot: string): Promise<Buffer> {
-  const psPath = join(tempRoot, "deses-via.ps");
-  const outPdf = join(tempRoot, "deses-fitted.pdf");
-  await execFileAsync(
-    "gs",
-    [
-      "-dNOPAUSE",
-      "-dBATCH",
-      "-dSAFER",
-      "-dQUIET",
-      "-sDEVICE=ps2write",
-      `-sOutputFile=${psPath}`,
-      inputPdfPath,
-    ],
-    {
-      timeout: 120_000,
-      maxBuffer: 80 * 1024 * 1024,
-    },
-  );
-  await execFileAsync(
-    "gs",
-    [
-      "-dNOPAUSE",
-      "-dBATCH",
-      "-dSAFER",
-      "-dQUIET",
-      "-sDEVICE=pdfwrite",
-      "-dCompatibilityLevel=1.4",
-      "-dPDFSETTINGS=/prepress",
-      "-dPDFFitPage",
-      "-dFIXEDMEDIA",
-      "-dDEVICEWIDTHPOINTS=1191",
-      "-dDEVICEHEIGHTPOINTS=842",
-      "-dAutoRotatePages=/None",
-      `-sOutputFile=${outPdf}`,
-      psPath,
-    ],
-    {
-      timeout: 120_000,
-      maxBuffer: 80 * 1024 * 1024,
-    },
-  );
-  return Buffer.from(await readFile(outPdf));
-}
-
-/**
- * Rearma el PDF pagina a pagina (respaldo). Fudge de ancho: LO suele declarar menos ancho del que pinta.
- */
-async function fitDesesPdfPagesToA3Landscape(pdfBytes: Buffer): Promise<Buffer> {
-  const targetW = 1191;
-  const targetH = 842;
-  const margin = 0.88;
-  const widthFudge = 1.15;
-  const src = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-  const out = await PDFDocument.create();
-  const n = src.getPageCount();
-
-  for (let i = 0; i < n; i += 1) {
-    const srcPage = src.getPages()[i];
-    let baseW = srcPage.getWidth();
-    let baseH = srcPage.getHeight();
-    const rot = srcPage.getRotation().angle;
-    if (rot === 90 || rot === 270) {
-      const t = baseW;
-      baseW = baseH;
-      baseH = t;
-    }
-
-    const embedded = await out.embedPage(srcPage);
-    const ew = embedded.width;
-    const eh = embedded.height;
-    const effW = Math.max(ew, baseW) * widthFudge;
-    const effH = Math.max(eh, baseH);
-    const scale = Math.min((targetW * margin) / effW, (targetH * margin) / effH);
-    const drawW = ew * scale;
-    const drawH = eh * scale;
-    const x = (targetW - drawW) / 2;
-    const y = (targetH - drawH) / 2;
-    const page = out.addPage([targetW, targetH]);
-    page.drawPage(embedded, {
-      x,
-      y,
-      width: drawW,
-      height: drawH,
-    });
-  }
-
-  return Buffer.from(await out.save());
-}
-
-/** Respaldo: GS directo sobre PDF (PDFFitPage suele no aplicar). */
-async function fitPdfToA3LandscapeWithGhostscript(
-  inputPdfPath: string,
-  tempRoot: string,
-) {
-  const outPath = join(tempRoot, "fitted-a3l.pdf");
-  await execFileAsync(
-    "gs",
-    [
-      "-o",
-      outPath,
-      "-sDEVICE=pdfwrite",
-      "-dCompatibilityLevel=1.4",
-      "-dPDFSETTINGS=/prepress",
-      "-dNOPAUSE",
-      "-dBATCH",
-      "-dSAFER",
-      "-dQUIET",
-      "-dPDFFitPage",
-      "-dFIXEDMEDIA",
-      "-dDEVICEWIDTHPOINTS=1191",
-      "-dDEVICEHEIGHTPOINTS=842",
-      inputPdfPath,
-    ],
-    {
-      timeout: 120_000,
-      maxBuffer: 50 * 1024 * 1024,
-    },
-  );
-  return Buffer.from(await readFile(outPath));
 }
 
 function isTruthyEnvFlag(value: string | undefined) {
@@ -666,7 +447,25 @@ function tightenPageMarginsForPdf(xml: string) {
   return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
 }
 
-/** A3 apaisado + 1 pagina de ancho: mas area util que A4; quita scale para que LO aplique fit. */
+/** Márgenes más finos solo en Desesplast: más ancho útil para columnas. */
+function tightenPageMarginsForDesesplastPdf(xml: string) {
+  const marginTag =
+    '<pageMargins left="0.1" right="0.1" top="0.2" bottom="0.2" header="0.1" footer="0.1"/>';
+  const re = /<pageMargins\b[^>]*\/>/;
+  if (re.test(xml)) {
+    return xml.replace(re, marginTag);
+  }
+  if (xml.includes("</sheetData>")) {
+    return xml.replace("</sheetData>", `</sheetData>${marginTag}`);
+  }
+  return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
+}
+
+/**
+ * A2 apaisado + ajustar a 1×1 página: escala toda la hoja para que entre el ancho
+ * (y el alto del bloque) en una sola página, sin recortes laterales.
+ * paperSize 66 = A2 en la enumeración binaria de Excel/OOXML.
+ */
 function ensureLandscapePageSetupDeses(xml: string) {
   const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
   if (pageSetupRegex.test(xml)) {
@@ -675,14 +474,14 @@ function ensureLandscapePageSetupDeses(xml: string) {
       next = stripScaleFromPageSetupTag(next);
       next = upsertXmlAttr(next, "orientation", "landscape");
       next = upsertXmlAttr(next, "fitToWidth", "1");
-      next = upsertXmlAttr(next, "fitToHeight", "0");
-      next = upsertXmlAttr(next, "paperSize", "8");
+      next = upsertXmlAttr(next, "fitToHeight", "1");
+      next = upsertXmlAttr(next, "paperSize", "66");
       return next;
     });
   }
 
   const insertion =
-    '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="8"/>';
+    '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="1" paperSize="66"/>';
   const marginSelfClosing = /<pageMargins\b[^>]*\/>/;
   if (marginSelfClosing.test(xml)) {
     return xml.replace(marginSelfClosing, (m) => `${m}${insertion}`);
@@ -694,7 +493,7 @@ function ensureLandscapePageSetupDeses(xml: string) {
 }
 
 function desesplastPrepareWorksheetXml(xml: string) {
-  let out = tightenPageMarginsForPdf(xml);
+  let out = tightenPageMarginsForDesesplastPdf(xml);
   out = ensureSheetPrFitToPage(out);
   out = ensureLandscapePageSetupDeses(out);
   return out;
