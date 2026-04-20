@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 import JSZip from "jszip";
+import { PDFDocument } from "pdf-lib";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
 import { createClient } from "@/lib/supabase/server";
@@ -131,11 +132,17 @@ export async function POST(request: Request) {
             const desesPdfPostFit =
               isDesesplastResultsXlsx(file.name) || body.companyType === "desesplast";
             let pdfBytes: Buffer = Buffer.from(await readFile(localPdf));
-            if (desesPdfPostFit && (await hasGhostscript())) {
+            if (desesPdfPostFit) {
               try {
-                pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
+                pdfBytes = await fitDesesPdfPagesToA3Landscape(pdfBytes);
               } catch {
-                /* PDF de LibreOffice sin post-proceso */
+                if (await hasGhostscript()) {
+                  try {
+                    pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
+                  } catch {
+                    /* PDF de LibreOffice sin post-proceso */
+                  }
+                }
               }
             }
             const pdfPath = filePath.replace(/\.xlsx$/i, ".pdf");
@@ -201,7 +208,39 @@ async function hasGhostscript() {
   }
 }
 
-/** A3 apaisado en puntos (~420×297 mm). PDFFitPage escala cada pagina para que quepa (LO ignora fit OOXML en muchos .xls). */
+/**
+ * Rearma el PDF pagina a pagina: cada hoja de LO se dibuja escalada dentro de A3 apaisado.
+ * Ghostscript -dPDFFitPage no aplica a entrada PDF; esto si fuerza el ancho/alto.
+ */
+async function fitDesesPdfPagesToA3Landscape(pdfBytes: Buffer): Promise<Buffer> {
+  const targetW = 1191;
+  const targetH = 842;
+  const src = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const out = await PDFDocument.create();
+  const n = src.getPageCount();
+
+  for (let i = 0; i < n; i += 1) {
+    const [embedded] = await out.embedPdf(src, [i]);
+    const pw = embedded.width;
+    const ph = embedded.height;
+    const scale = Math.min(targetW / pw, targetH / ph) * 0.98;
+    const drawW = pw * scale;
+    const drawH = ph * scale;
+    const x = (targetW - drawW) / 2;
+    const y = (targetH - drawH) / 2;
+    const page = out.addPage([targetW, targetH]);
+    page.drawPage(embedded, {
+      x,
+      y,
+      width: drawW,
+      height: drawH,
+    });
+  }
+
+  return Buffer.from(await out.save());
+}
+
+/** Respaldo: GS (PDFFitPage en muchas versiones no escala PDF->PDF; puede no hacer nada util). */
 async function fitPdfToA3LandscapeWithGhostscript(
   inputPdfPath: string,
   tempRoot: string,
