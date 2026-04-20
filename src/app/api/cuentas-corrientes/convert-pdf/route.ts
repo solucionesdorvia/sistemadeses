@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -135,23 +135,31 @@ export async function POST(request: Request) {
             if (desesPdfPostFit) {
               const rawPdf = Buffer.from(pdfBytes);
               try {
-                if (await hasGhostscript()) {
-                  pdfBytes = await fitDesesPdfViaPsThenPdf(localPdf, tempRoot);
+                if (await hasPdftoppm()) {
+                  pdfBytes = await fitDesesPdfRasterToA3Landscape(localPdf, tempRoot);
                 } else {
-                  throw new Error("sin ghostscript");
+                  throw new Error("sin pdftoppm");
                 }
               } catch {
                 try {
-                  pdfBytes = await fitDesesPdfPagesToA3Landscape(rawPdf);
-                } catch {
                   if (await hasGhostscript()) {
-                    try {
-                      pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
-                    } catch {
+                    pdfBytes = await fitDesesPdfViaPsThenPdf(localPdf, tempRoot);
+                  } else {
+                    throw new Error("sin ghostscript");
+                  }
+                } catch {
+                  try {
+                    pdfBytes = await fitDesesPdfPagesToA3Landscape(rawPdf);
+                  } catch {
+                    if (await hasGhostscript()) {
+                      try {
+                        pdfBytes = await fitPdfToA3LandscapeWithGhostscript(localPdf, tempRoot);
+                      } catch {
+                        pdfBytes = rawPdf;
+                      }
+                    } else {
                       pdfBytes = rawPdf;
                     }
-                  } else {
-                    pdfBytes = rawPdf;
                   }
                 }
               }
@@ -217,6 +225,68 @@ async function hasGhostscript() {
   } catch {
     return false;
   }
+}
+
+async function hasPdftoppm() {
+  try {
+    await execFileAsync("which", ["pdftoppm"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rasteriza cada pagina (Poppler) y la vuelve a PDF encajada en A3 apaisado.
+ * Garantiza que nada se salga del ancho/alto: es imagen escalada (no texto seleccionable).
+ */
+async function fitDesesPdfRasterToA3Landscape(
+  inputPdfPath: string,
+  tempRoot: string,
+): Promise<Buffer> {
+  const outPrefix = join(tempRoot, "dscan");
+  await execFileAsync(
+    "pdftoppm",
+    ["-png", "-r", "144", "-scale-to", "4000", inputPdfPath, outPrefix],
+    {
+      timeout: 300_000,
+      maxBuffer: 4 * 1024 * 1024,
+    },
+  );
+
+  const entries = await readdir(tempRoot);
+  const pngNames = entries
+    .filter((f) => /^dscan-\d+\.png$/i.test(f))
+    .sort((a, b) => {
+      const na = Number.parseInt(a.match(/(\d+)/)?.[1] ?? "0", 10);
+      const nb = Number.parseInt(b.match(/(\d+)/)?.[1] ?? "0", 10);
+      return na - nb;
+    });
+
+  if (pngNames.length === 0) {
+    throw new Error("pdftoppm no genero PNG.");
+  }
+
+  const targetW = 1191;
+  const targetH = 842;
+  const boxW = targetW * 0.98;
+  const boxH = targetH * 0.98;
+  const outPdf = await PDFDocument.create();
+
+  for (const name of pngNames) {
+    const pngBytes = await readFile(join(tempRoot, name));
+    const pngImage = await outPdf.embedPng(pngBytes);
+    const { width: dw, height: dh } = pngImage.scaleToFit(boxW, boxH);
+    const page = outPdf.addPage([targetW, targetH]);
+    page.drawImage(pngImage, {
+      x: (targetW - dw) / 2,
+      y: (targetH - dh) / 2,
+      width: dw,
+      height: dh,
+    });
+  }
+
+  return Buffer.from(await outPdf.save());
 }
 
 /**
