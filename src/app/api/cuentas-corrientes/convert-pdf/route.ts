@@ -244,7 +244,7 @@ async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) 
       "--nofirststartwizard",
       `-env:UserInstallation=${userInstallation}`,
       "--convert-to",
-      "pdf",
+      "pdf:calc_pdf_Export",
       "--outdir",
       tempRoot,
       localXlsx,
@@ -334,18 +334,34 @@ function stripFitToPageAttrs(tag: string) {
     .replace(/\s+fitToHeight="[^"]*"/gi, "");
 }
 
+function stripScaleFromPageSetupTag(tag: string) {
+  return tag.replace(/\s+scale="[^"]*"/gi, "");
+}
+
+function listWorksheetXmlPaths(zip: JSZip) {
+  return Object.keys(zip.files)
+    .filter((p) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(p) && !zip.files[p].dir)
+    .sort((a, b) => {
+      const na = Number.parseInt(a.match(/sheet(\d+)\.xml/i)?.[1] ?? "0", 10);
+      const nb = Number.parseInt(b.match(/sheet(\d+)\.xml/i)?.[1] ?? "0", 10);
+      return na - nb;
+    });
+}
+
 async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
   try {
     const zip = await JSZip.loadAsync(sourceBytes);
-    const worksheetPath = await resolveFirstWorksheetPath(zip);
-    const worksheetFile = zip.file(worksheetPath);
-    if (!worksheetFile) return sourceBytes;
+    const paths = listWorksheetXmlPaths(zip);
+    const targets = paths.length > 0 ? paths : [await resolveFirstWorksheetPath(zip)];
 
-    let xml = await worksheetFile.async("text");
-    xml = ensureSheetPrFitToPage(xml);
-    xml = ensureLandscapePageSetup(xml);
-
-    zip.file(worksheetPath, xml);
+    for (const worksheetPath of targets) {
+      const worksheetFile = zip.file(worksheetPath);
+      if (!worksheetFile) continue;
+      let xml = await worksheetFile.async("text");
+      xml = ensureSheetPrFitToPage(xml);
+      xml = ensureLandscapePageSetup(xml);
+      zip.file(worksheetPath, xml);
+    }
     return await zip.generateAsync({ type: "uint8array" });
   } catch {
     return sourceBytes;
@@ -388,20 +404,25 @@ function ensureSheetPrFitToPage(xml: string) {
   return xml.replace(/<worksheet\b[^>]*>/, (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`);
 }
 
+/**
+ * A3 apaisado + 1 página de ancho (paperSize 8). Más superficie que A4 (9) para cuentas anchas.
+ * Se quita scale explícito para que LibreOffice aplique bien fitToWidth.
+ */
 function ensureLandscapePageSetup(xml: string) {
   const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
   if (pageSetupRegex.test(xml)) {
     return xml.replace(pageSetupRegex, (tag) => {
-      let next = tag;
+      let next = stripFitToPageAttrs(tag);
+      next = stripScaleFromPageSetupTag(next);
       next = upsertXmlAttr(next, "orientation", "landscape");
       next = upsertXmlAttr(next, "fitToWidth", "1");
       next = upsertXmlAttr(next, "fitToHeight", "0");
-      next = upsertXmlAttr(next, "paperSize", "9");
+      next = upsertXmlAttr(next, "paperSize", "8");
       return next;
     });
   }
 
-  const insertion = '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="9"/>';
+  const insertion = '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="8"/>';
   if (xml.includes("</pageMargins>")) {
     return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
   }
