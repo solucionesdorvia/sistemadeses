@@ -29,8 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libreoffice-java-common \
   libreoffice \
   fonts-dejavu-core \
-  ghostscript \
-  poppler-utils \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/package*.json ./

@@ -17,11 +17,6 @@ const serverEnvSchema = z.object({
   CONVERT_PDF_FORCE_LANDSCAPE_FIT: z.string().optional(),
   /** Escala de impresion 10-400 para PDF (default 100). Subir (p. ej. 140) si el texto sale muy chico. */
   CONVERT_PDF_PRINT_SCALE: z.string().optional(),
-  /**
-   * Solo Desesplast (antes de raster): escala % de impresión 25-100 (default 42).
-   * Más bajo = encoge más la grilla y suele entrar todo el ancho en una página de LO.
-   */
-  CONVERT_PDF_DESES_PRINT_SCALE: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 });
 
@@ -53,7 +48,6 @@ export function getServerEnv() {
     CONVERTAPI_SECRET: process.env.CONVERTAPI_SECRET,
     CONVERT_PDF_FORCE_LANDSCAPE_FIT: process.env.CONVERT_PDF_FORCE_LANDSCAPE_FIT,
     CONVERT_PDF_PRINT_SCALE: process.env.CONVERT_PDF_PRINT_SCALE,
-    CONVERT_PDF_DESES_PRINT_SCALE: process.env.CONVERT_PDF_DESES_PRINT_SCALE,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   });
 }
