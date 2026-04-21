@@ -199,8 +199,13 @@ function isDesesplastResultsXlsx(fileName: string) {
   return fileName.toLowerCase().endsWith("_desesplast.xlsx");
 }
 
+/** Escala de impresión sin "ajustar a página" (fit encogía todo en una esquina). */
+const PDF_PRINT_SCALE_DAYS = 110;
+const PDF_PRINT_SCALE_DESES = 110;
+
 /**
- * Siempre apaisado + fit ancho. Days/Americana: A3. Desesplast: A2 + márgenes finos.
+ * Apaisado + papel grande + escala %. Days/Americana: A3. Desesplast: A2 + márgenes finos.
+ * Sin fitToWidth/fitToPage: evita PDF con letra minúscula y mitad de hoja en blanco.
  */
 async function buildXlsxBytesForPdf(params: {
   sourceBytes: Uint8Array;
@@ -213,9 +218,9 @@ async function buildXlsxBytesForPdf(params: {
     requestCompanyType === "desesplast" || isDesesplastResultsXlsx(fileName);
 
   if (isDesesplast) {
-    return forceDesesplastLandscapeAndFitToWidth(sourceBytes);
+    return prepareDesesplastPdfPrint(sourceBytes);
   }
-  return forceLandscapeAndFitToWidth(sourceBytes);
+  return prepareDaysAmericanaPdfPrint(sourceBytes);
 }
 
 async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) {
@@ -268,7 +273,7 @@ function listWorksheetXmlPaths(zip: JSZip) {
     });
 }
 
-async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
+async function prepareDaysAmericanaPdfPrint(sourceBytes: Uint8Array) {
   try {
     const zip = await JSZip.loadAsync(sourceBytes);
     const paths = listWorksheetXmlPaths(zip);
@@ -278,8 +283,8 @@ async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
       const worksheetFile = zip.file(worksheetPath);
       if (!worksheetFile) continue;
       let xml = await worksheetFile.async("text");
-      xml = ensureSheetPrFitToPage(xml);
-      xml = ensureLandscapePageSetup(xml);
+      xml = ensureSheetPrNoFitToPage(xml);
+      xml = ensureLandscapeScaledPrint(xml, "8", PDF_PRINT_SCALE_DAYS);
       zip.file(worksheetPath, xml);
     }
     return await zip.generateAsync({ type: "uint8array" });
@@ -288,8 +293,7 @@ async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
   }
 }
 
-/** Desesplast: más ancho útil (A2) y márgenes chicos; el resto igual que landscape+fit. */
-async function forceDesesplastLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
+async function prepareDesesplastPdfPrint(sourceBytes: Uint8Array) {
   try {
     const zip = await JSZip.loadAsync(sourceBytes);
     const paths = listWorksheetXmlPaths(zip);
@@ -300,8 +304,8 @@ async function forceDesesplastLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
       if (!worksheetFile) continue;
       let xml = await worksheetFile.async("text");
       xml = tightenPageMarginsForDeses(xml);
-      xml = ensureSheetPrFitToPage(xml);
-      xml = ensureLandscapePageSetupDeses(xml);
+      xml = ensureSheetPrNoFitToPage(xml);
+      xml = ensureLandscapeScaledPrint(xml, "66", PDF_PRINT_SCALE_DESES);
       zip.file(worksheetPath, xml);
     }
     return await zip.generateAsync({ type: "uint8array" });
@@ -323,25 +327,46 @@ function tightenPageMarginsForDeses(xml: string) {
   return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
 }
 
-/**
- * A2 apaisado (paperSize 66 en Excel). Más superficie horizontal que A3 (8) para cuentas Deses.
- */
-function ensureLandscapePageSetupDeses(xml: string) {
+function ensureSheetPrNoFitToPage(xml: string) {
+  const pageSetUpPrRegex = /<pageSetUpPr\b[^>]*\/>/;
+  if (pageSetUpPrRegex.test(xml)) {
+    return xml.replace(pageSetUpPrRegex, (tag) => upsertXmlAttr(tag, "fitToPage", "0"));
+  }
+
+  const sheetPrBlockRegex = /<sheetPr\b[^>]*>([\s\S]*?)<\/sheetPr>/;
+  if (sheetPrBlockRegex.test(xml)) {
+    return xml.replace(sheetPrBlockRegex, (block) => {
+      if (/<pageSetUpPr\b/.test(block)) {
+        return block.replace(/<pageSetUpPr\b[^>]*\/>/, (tag) =>
+          upsertXmlAttr(tag, "fitToPage", "0"),
+        );
+      }
+      return block.replace("</sheetPr>", '<pageSetUpPr fitToPage="0"/></sheetPr>');
+    });
+  }
+
+  return xml.replace(
+    /<worksheet\b[^>]*>/,
+    (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="0"/></sheetPr>`,
+  );
+}
+
+/** Apaisado, tamaño de papel Excel (8=A3, 66=A2), escala %; sin fitToWidth (evita miniatura). */
+function ensureLandscapeScaledPrint(xml: string, paperSize: string, scalePercent: number) {
+  const scaleStr = String(scalePercent);
   const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
   if (pageSetupRegex.test(xml)) {
     return xml.replace(pageSetupRegex, (tag) => {
       let next = stripFitToPageAttrs(tag);
       next = stripScaleFromPageSetupTag(next);
       next = upsertXmlAttr(next, "orientation", "landscape");
-      next = upsertXmlAttr(next, "fitToWidth", "1");
-      next = upsertXmlAttr(next, "fitToHeight", "0");
-      next = upsertXmlAttr(next, "paperSize", "66");
+      next = upsertXmlAttr(next, "paperSize", paperSize);
+      next = upsertXmlAttr(next, "scale", scaleStr);
       return next;
     });
   }
 
-  const insertion =
-    '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="66"/>';
+  const insertion = `<pageSetup scale="${scaleStr}" orientation="landscape" paperSize="${paperSize}"/>`;
   if (xml.includes("</pageMargins>")) {
     return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
   }
@@ -369,50 +394,6 @@ async function resolveFirstWorksheetPath(zip: JSZip) {
   if (!target) return "xl/worksheets/sheet1.xml";
   const normalizedTarget = target.replace(/^\/+/, "");
   return normalizedTarget.startsWith("xl/") ? normalizedTarget : `xl/${normalizedTarget}`;
-}
-
-function ensureSheetPrFitToPage(xml: string) {
-  const pageSetUpPrRegex = /<pageSetUpPr\b[^>]*\/>/;
-  if (pageSetUpPrRegex.test(xml)) {
-    return xml.replace(pageSetUpPrRegex, (tag) => upsertXmlAttr(tag, "fitToPage", "1"));
-  }
-
-  const sheetPrBlockRegex = /<sheetPr\b[^>]*>([\s\S]*?)<\/sheetPr>/;
-  if (sheetPrBlockRegex.test(xml)) {
-    return xml.replace(sheetPrBlockRegex, (block) =>
-      block.replace("</sheetPr>", '<pageSetUpPr fitToPage="1"/></sheetPr>'),
-    );
-  }
-
-  return xml.replace(/<worksheet\b[^>]*>/, (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`);
-}
-
-/**
- * A3 apaisado + 1 página de ancho (paperSize 8). Más superficie que A4 (9) para cuentas anchas.
- * Se quita scale explícito para que LibreOffice aplique bien fitToWidth.
- */
-function ensureLandscapePageSetup(xml: string) {
-  const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
-  if (pageSetupRegex.test(xml)) {
-    return xml.replace(pageSetupRegex, (tag) => {
-      let next = stripFitToPageAttrs(tag);
-      next = stripScaleFromPageSetupTag(next);
-      next = upsertXmlAttr(next, "orientation", "landscape");
-      next = upsertXmlAttr(next, "fitToWidth", "1");
-      next = upsertXmlAttr(next, "fitToHeight", "0");
-      next = upsertXmlAttr(next, "paperSize", "8");
-      return next;
-    });
-  }
-
-  const insertion = '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="8"/>';
-  if (xml.includes("</pageMargins>")) {
-    return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
-  }
-  if (xml.includes("</sheetData>")) {
-    return xml.replace("</sheetData>", `</sheetData>${insertion}`);
-  }
-  return xml.replace("</worksheet>", `${insertion}</worksheet>`);
 }
 
 function upsertXmlAttr(tag: string, attrName: string, attrValue: string) {
