@@ -109,8 +109,13 @@ async function convertWithLibreOffice(
 }
 
 function convertWithSheetJS(sourceBytes: Uint8Array): Buffer {
+  // Mismas opciones que process/route al leer .xlsx: sin esto, .xls→xlsx pierde merges,
+  // cell.w (texto formateado) y el bloque Deses/Days deja de encontrar "Vendedor:" en cols 2–30.
   const workbook = XLSX.read(sourceBytes, {
     type: "array",
+    cellStyles: true,
+    cellNF: true,
+    cellFormula: true,
     cellDates: true,
   });
 
@@ -121,5 +126,6 @@ function convertWithSheetJS(sourceBytes: Uint8Array): Buffer {
   return XLSX.write(workbook, {
     bookType: "xlsx",
     type: "buffer",
+    cellStyles: true,
   }) as Buffer;
 }

@@ -161,8 +161,11 @@ function detectVendorBlocks(sheet: XLSX.WorkSheet, companyType: Body["companyTyp
       }
     }
   } else {
+    // Days: encabezados suelen arrancar en col C (índice 2). Desesplast .xls→SheetJS a veces
+    // desplaza "Vendedor:" hacia la izquierda; escanear desde A evita 0 vendedores.
+    const vendorLabelFromCol = companyType === "desesplast" ? 0 : 2;
     for (let rowIndex = range.s.r; rowIndex <= range.e.r; rowIndex += 1) {
-      const asText = readRowText(sheet, rowIndex, 2, 30);
+      const asText = readRowText(sheet, rowIndex, vendorLabelFromCol, 35);
       const match = asText.match(regex);
       if (match?.[1]) markers.set(rowIndex, match[1].trim());
     }

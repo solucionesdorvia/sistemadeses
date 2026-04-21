@@ -228,9 +228,10 @@ function detectVendorBlocks(
       }
     }
   } else {
-    // Days/Desesplast: escaneo textual C:AE
+    // Days: columnas desde C. Desesplast (.xls vía SheetJS): "Vendedor:" puede quedar más a la izquierda.
+    const vendorLabelFromCol = companyType === "desesplast" ? 0 : 2;
     for (let rowIndex = range.s.r; rowIndex <= range.e.r; rowIndex += 1) {
-      const asText = readRowText(sheet, rowIndex, 2, 30);
+      const asText = readRowText(sheet, rowIndex, vendorLabelFromCol, 35);
       const match = asText.match(regex);
       if (match?.[1]) {
         markers.set(rowIndex, match[1].trim());
