@@ -275,7 +275,87 @@ async function prepareDaysAmericanaPdfPrint(sourceBytes: Uint8Array) {
 }
 
 async function prepareDesesplastPdfPrint(sourceBytes: Uint8Array) {
-  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "66", true);
+  // Mismo tamaño que Days: A2 dejaba página muy ancha y la grilla se veía “chica” con franjas.
+  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "8", true);
+}
+
+type WorkbookWorksheetRef = {
+  localSheetId: number;
+  sheetName: string;
+  worksheetPath: string;
+};
+
+/**
+ * Orden real del workbook + localSheetId correcto (incluye hojas que no son worksheet).
+ * Antes se asumía sheet1.xml=índice 0; si hay otra hoja antes, Print_Area quedaba mal y LO escalaba con área errónea.
+ */
+async function listWorkbookWorksheetRefs(zip: JSZip): Promise<WorkbookWorksheetRef[]> {
+  const workbookXml = await zip.file("xl/workbook.xml")?.async("text");
+  const workbookRelsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("text");
+  const out: WorkbookWorksheetRef[] = [];
+  if (!workbookXml || !workbookRelsXml) return out;
+
+  const sheetTagMatches = [...workbookXml.matchAll(/<sheet\b([^/>]*)\/?>/gi)];
+  let localSheetId = 0;
+  for (const m of sheetTagMatches) {
+    const attrs = m[1];
+    const nameMatch = attrs.match(/\bname="([^"]*)"/);
+    const ridMatch = attrs.match(/\br:id="([^"]+)"/i);
+    const sheetName = nameMatch?.[1] ?? "";
+    const rid = ridMatch?.[1];
+    if (rid && sheetName) {
+      const escapedRid = rid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const relRegex = new RegExp(
+        `<Relationship\\b[^>]*Id="${escapedRid}"[^>]*Target="([^"]+)"[^>]*/?>`,
+        "i",
+      );
+      const relMatch = workbookRelsXml.match(relRegex);
+      const target = relMatch?.[1];
+      if (target) {
+        const normalized = target.replace(/^\/+/, "");
+        const fullPath = normalized.startsWith("xl/") ? normalized : `xl/${normalized}`;
+        if (
+          /^xl\/worksheets\/sheet\d+\.xml$/i.test(fullPath) &&
+          zip.files[fullPath] &&
+          !zip.files[fullPath].dir
+        ) {
+          out.push({ localSheetId, sheetName, worksheetPath: fullPath });
+        }
+      }
+    }
+    localSheetId += 1;
+  }
+  return out;
+}
+
+async function fallbackWorksheetTargetsWithoutWorkbookOrder(
+  zip: JSZip,
+): Promise<Array<{ localSheetId: number; worksheetPath: string }>> {
+  const paths = listWorksheetXmlPaths(zip);
+  const list = paths.length > 0 ? paths : [await resolveFirstWorksheetPath(zip)];
+  return list.map((worksheetPath, i) => ({ localSheetId: i, worksheetPath }));
+}
+
+/** Rango usado por SheetJS a partir de celdas reales + merges (más fiable que regex XML en .xls→xlsx). */
+function getTightRangeFromSheet(sheet: XLSX.WorkSheet): XLSX.Range | null {
+  const rawRef = sheet["!ref"];
+  if (!rawRef) return null;
+  let rng: XLSX.Range;
+  try {
+    rng = XLSX.utils.decode_range(rawRef);
+  } catch {
+    return null;
+  }
+  const merges = sheet["!merges"] as XLSX.Range[] | undefined;
+  if (merges?.length) {
+    for (const m of merges) {
+      rng.s.c = Math.min(rng.s.c, m.s.c, m.e.c);
+      rng.s.r = Math.min(rng.s.r, m.s.r, m.e.r);
+      rng.e.c = Math.max(rng.e.c, m.s.c, m.e.c);
+      rng.e.r = Math.max(rng.e.r, m.s.r, m.e.r);
+    }
+  }
+  return rng;
 }
 
 async function preparePdfWorkbookWithTightPrintArea(
@@ -285,18 +365,48 @@ async function preparePdfWorkbookWithTightPrintArea(
 ) {
   try {
     const zip = await JSZip.loadAsync(sourceBytes);
-    const paths = listWorksheetXmlPaths(zip);
-    const targets = paths.length > 0 ? paths : [await resolveFirstWorksheetPath(zip)];
+    let wb: XLSX.WorkBook | null = null;
+    try {
+      wb = XLSX.read(sourceBytes, {
+        type: "array",
+        cellDates: true,
+        cellNF: true,
+        cellFormula: true,
+        cellStyles: true,
+      });
+    } catch {
+      wb = null;
+    }
+
+    const refs = await listWorkbookWorksheetRefs(zip);
+    const targets: Array<
+      WorkbookWorksheetRef | { localSheetId: number; worksheetPath: string; sheetName?: string }
+    > =
+      refs.length > 0 ? refs : await fallbackWorksheetTargetsWithoutWorkbookOrder(zip);
+
     const printEntries: Array<{ sheetIndex: number; areaDollar: string }> = [];
 
-    for (let sheetIndex = 0; sheetIndex < targets.length; sheetIndex += 1) {
-      const worksheetPath = targets[sheetIndex];
+    for (const t of targets) {
+      const worksheetPath = t.worksheetPath;
+      const localSheetId = t.localSheetId;
+      const sheetName = "sheetName" in t && t.sheetName ? t.sheetName : wb?.SheetNames?.[localSheetId];
+
       const worksheetFile = zip.file(worksheetPath);
       if (!worksheetFile) continue;
       let xml = await worksheetFile.async("text");
-      xml = applyTightDimensionFromContent(xml, 1, 1);
+
+      let range: XLSX.Range | null = null;
+      if (wb && sheetName && wb.Sheets[sheetName]) {
+        range = getTightRangeFromSheet(wb.Sheets[sheetName]);
+      }
+      if (range) {
+        xml = applyTightDimensionFromRange(xml, range, 1, 1);
+      } else {
+        xml = applyTightDimensionFromContent(xml, 1, 1);
+      }
+
       const area = getDollarPrintAreaFromWorksheetXml(xml);
-      if (area) printEntries.push({ sheetIndex, areaDollar: area });
+      if (area) printEntries.push({ sheetIndex: localSheetId, areaDollar: area });
       if (useDesesMargins) xml = tightenPageMarginsForDeses(xml);
       xml = ensureSheetPrFitToPage(xml);
       xml = ensureLandscapeFitToWidthPrint(xml, paperSize);
@@ -305,7 +415,8 @@ async function preparePdfWorkbookWithTightPrintArea(
 
     await patchWorkbookPrintAreas(zip, printEntries);
     return await zip.generateAsync({ type: "uint8array" });
-  } catch {
+  } catch (err) {
+    console.error("[convert-pdf] preparePdfWorkbookWithTightPrintArea", err);
     return sourceBytes;
   }
 }
@@ -339,7 +450,7 @@ function ensureSheetPrFitToPage(xml: string) {
   return xml.replace(/<worksheet\b[^>]*>/, (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`);
 }
 
-/** Apaisado + ajustar a 1 página de ancho (requiere área de impresión acotada). paperSize 8=A3, 66=A2. */
+/** Apaisado + ajustar a 1 página de ancho (requiere área de impresión acotada). paperSize 8=A3. */
 function ensureLandscapeFitToWidthPrint(xml: string, paperSize: string) {
   const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
   if (pageSetupRegex.test(xml)) {
@@ -400,14 +511,15 @@ function computeContentBoundsFromWorksheetXml(xml: string): CellBounds | null {
   return b;
 }
 
-function applyTightDimensionFromContent(xml: string, padCols: number, padRows: number): string {
-  const b = computeContentBoundsFromWorksheetXml(xml);
-  if (!b) return xml;
-  b.maxC += padCols;
-  b.maxR += padRows;
+function applyTightDimensionFromRange(
+  xml: string,
+  rng: XLSX.Range,
+  padCols: number,
+  padRows: number,
+): string {
   const ref = XLSX.utils.encode_range({
-    s: { r: b.minR, c: b.minC },
-    e: { r: b.maxR, c: b.maxC },
+    s: { r: rng.s.r, c: rng.s.c },
+    e: { r: rng.e.r + padRows, c: rng.e.c + padCols },
   });
   const dimRe = /<dimension\b[^>]*\/>/;
   if (dimRe.test(xml)) {
@@ -417,6 +529,17 @@ function applyTightDimensionFromContent(xml: string, padCols: number, padRows: n
     return xml.replace("<sheetData>", `<dimension ref="${ref}"/><sheetData>`);
   }
   return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}<dimension ref="${ref}"/>`);
+}
+
+function applyTightDimensionFromContent(xml: string, padCols: number, padRows: number): string {
+  const b = computeContentBoundsFromWorksheetXml(xml);
+  if (!b) return xml;
+  return applyTightDimensionFromRange(
+    xml,
+    { s: { r: b.minR, c: b.minC }, e: { r: b.maxR, c: b.maxC } },
+    padCols,
+    padRows,
+  );
 }
 
 function getDollarPrintAreaFromWorksheetXml(xml: string): string | null {
