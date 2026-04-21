@@ -121,6 +121,8 @@ export async function POST(request: Request) {
           try {
             const xlsxForPdf = await buildXlsxBytesForPdf({
               sourceBytes,
+              fileName: file.name,
+              requestCompanyType: body.companyType,
               forceLandscapePdf,
               printScalePercent,
             });
@@ -214,18 +216,36 @@ function parsePrintScalePercent(raw: string | undefined) {
   return Math.min(400, Math.max(10, n));
 }
 
+function isDesesplastResultsXlsx(fileName: string) {
+  return fileName.toLowerCase().endsWith("_desesplast.xlsx");
+}
+
 /**
- * Mismo criterio para americana, days y desesplast: sin ramas por empresa.
- * Ajustá tamaño con CONVERT_PDF_PRINT_SCALE (p. ej. 115) o CONVERT_PDF_FORCE_LANDSCAPE_FIT.
+ * Days / Americana: A3 apaisado + fit ancho. Desesplast: A2 + márgenes finos (tablas más anchas).
+ * Sin modo apaisado: escala % en la primera hoja para todos.
  */
 async function buildXlsxBytesForPdf(params: {
   sourceBytes: Uint8Array;
+  fileName: string;
+  requestCompanyType: Body["companyType"];
   forceLandscapePdf: boolean;
   printScalePercent: number;
 }): Promise<Uint8Array> {
-  const { sourceBytes, forceLandscapePdf, printScalePercent } = params;
+  const {
+    sourceBytes,
+    fileName,
+    requestCompanyType,
+    forceLandscapePdf,
+    printScalePercent,
+  } = params;
+
+  const isDesesplast =
+    requestCompanyType === "desesplast" || isDesesplastResultsXlsx(fileName);
 
   if (forceLandscapePdf) {
+    if (isDesesplast) {
+      return forceDesesplastLandscapeAndFitToWidth(sourceBytes);
+    }
     return forceLandscapeAndFitToWidth(sourceBytes);
   }
 
@@ -366,6 +386,69 @@ async function forceLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
   } catch {
     return sourceBytes;
   }
+}
+
+/** Desesplast: más ancho útil (A2) y márgenes chicos; el resto igual que landscape+fit. */
+async function forceDesesplastLandscapeAndFitToWidth(sourceBytes: Uint8Array) {
+  try {
+    const zip = await JSZip.loadAsync(sourceBytes);
+    const paths = listWorksheetXmlPaths(zip);
+    const targets = paths.length > 0 ? paths : [await resolveFirstWorksheetPath(zip)];
+
+    for (const worksheetPath of targets) {
+      const worksheetFile = zip.file(worksheetPath);
+      if (!worksheetFile) continue;
+      let xml = await worksheetFile.async("text");
+      xml = tightenPageMarginsForDeses(xml);
+      xml = ensureSheetPrFitToPage(xml);
+      xml = ensureLandscapePageSetupDeses(xml);
+      zip.file(worksheetPath, xml);
+    }
+    return await zip.generateAsync({ type: "uint8array" });
+  } catch {
+    return sourceBytes;
+  }
+}
+
+function tightenPageMarginsForDeses(xml: string) {
+  const marginTag =
+    '<pageMargins left="0.1" right="0.1" top="0.2" bottom="0.2" header="0.1" footer="0.1"/>';
+  const re = /<pageMargins\b[^>]*\/>/;
+  if (re.test(xml)) {
+    return xml.replace(re, marginTag);
+  }
+  if (xml.includes("</sheetData>")) {
+    return xml.replace("</sheetData>", `</sheetData>${marginTag}`);
+  }
+  return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
+}
+
+/**
+ * A2 apaisado (paperSize 66 en Excel). Más superficie horizontal que A3 (8) para cuentas Deses.
+ */
+function ensureLandscapePageSetupDeses(xml: string) {
+  const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
+  if (pageSetupRegex.test(xml)) {
+    return xml.replace(pageSetupRegex, (tag) => {
+      let next = stripFitToPageAttrs(tag);
+      next = stripScaleFromPageSetupTag(next);
+      next = upsertXmlAttr(next, "orientation", "landscape");
+      next = upsertXmlAttr(next, "fitToWidth", "1");
+      next = upsertXmlAttr(next, "fitToHeight", "0");
+      next = upsertXmlAttr(next, "paperSize", "66");
+      return next;
+    });
+  }
+
+  const insertion =
+    '<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="66"/>';
+  if (xml.includes("</pageMargins>")) {
+    return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
+  }
+  if (xml.includes("</sheetData>")) {
+    return xml.replace("</sheetData>", `</sheetData>${insertion}`);
+  }
+  return xml.replace("</worksheet>", `${insertion}</worksheet>`);
 }
 
 async function resolveFirstWorksheetPath(zip: JSZip) {

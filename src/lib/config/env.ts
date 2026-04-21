@@ -14,8 +14,8 @@ const serverEnvSchema = z.object({
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   CONVERTAPI_SECRET: z.string().optional(),
   /**
-   * PDF cuentas corrientes: apaisado + ajustar a ancho en A3 (fitToWidth), todas las hojas.
-   * Por defecto activo si la variable no está definida. Desactivar: "0", "false", "no", "off".
+   * PDF cuentas corrientes: apaisado + ajustar a ancho (fitToWidth), todas las hojas.
+   * Days/Americana: A3. Desesplast: A2 + márgenes finos. Por defecto activo. Desactivar: 0/false/no/off.
    */
   CONVERT_PDF_FORCE_LANDSCAPE_FIT: z.string().optional(),
   /** Escala de impresion 10-400 para PDF (default 100). Subir (p. ej. 140) si el texto sale muy chico. */
