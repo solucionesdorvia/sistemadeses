@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 import JSZip from "jszip";
+import * as XLSX from "xlsx";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
 import { createClient } from "@/lib/supabase/server";
@@ -199,13 +200,9 @@ function isDesesplastResultsXlsx(fileName: string) {
   return fileName.toLowerCase().endsWith("_desesplast.xlsx");
 }
 
-/** Escala de impresión sin "ajustar a página" (fit encogía todo en una esquina). */
-const PDF_PRINT_SCALE_DAYS = 110;
-const PDF_PRINT_SCALE_DESES = 110;
-
 /**
- * Apaisado + papel grande + escala %. Days/Americana: A3. Desesplast: A2 + márgenes finos.
- * Sin fitToWidth/fitToPage: evita PDF con letra minúscula y mitad de hoja en blanco.
+ * Área de impresión ajustada al contenido + fit ancho en papel grande.
+ * Sin esto, el "área" implícita es enorme y el PDF deja bandas vacías o escala mal.
  */
 async function buildXlsxBytesForPdf(params: {
   sourceBytes: Uint8Array;
@@ -274,40 +271,39 @@ function listWorksheetXmlPaths(zip: JSZip) {
 }
 
 async function prepareDaysAmericanaPdfPrint(sourceBytes: Uint8Array) {
-  try {
-    const zip = await JSZip.loadAsync(sourceBytes);
-    const paths = listWorksheetXmlPaths(zip);
-    const targets = paths.length > 0 ? paths : [await resolveFirstWorksheetPath(zip)];
-
-    for (const worksheetPath of targets) {
-      const worksheetFile = zip.file(worksheetPath);
-      if (!worksheetFile) continue;
-      let xml = await worksheetFile.async("text");
-      xml = ensureSheetPrNoFitToPage(xml);
-      xml = ensureLandscapeScaledPrint(xml, "8", PDF_PRINT_SCALE_DAYS);
-      zip.file(worksheetPath, xml);
-    }
-    return await zip.generateAsync({ type: "uint8array" });
-  } catch {
-    return sourceBytes;
-  }
+  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "8", false);
 }
 
 async function prepareDesesplastPdfPrint(sourceBytes: Uint8Array) {
+  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "66", true);
+}
+
+async function preparePdfWorkbookWithTightPrintArea(
+  sourceBytes: Uint8Array,
+  paperSize: string,
+  useDesesMargins: boolean,
+) {
   try {
     const zip = await JSZip.loadAsync(sourceBytes);
     const paths = listWorksheetXmlPaths(zip);
     const targets = paths.length > 0 ? paths : [await resolveFirstWorksheetPath(zip)];
+    const printEntries: Array<{ sheetIndex: number; areaDollar: string }> = [];
 
-    for (const worksheetPath of targets) {
+    for (let sheetIndex = 0; sheetIndex < targets.length; sheetIndex += 1) {
+      const worksheetPath = targets[sheetIndex];
       const worksheetFile = zip.file(worksheetPath);
       if (!worksheetFile) continue;
       let xml = await worksheetFile.async("text");
-      xml = tightenPageMarginsForDeses(xml);
-      xml = ensureSheetPrNoFitToPage(xml);
-      xml = ensureLandscapeScaledPrint(xml, "66", PDF_PRINT_SCALE_DESES);
+      xml = applyTightDimensionFromContent(xml, 1, 1);
+      const area = getDollarPrintAreaFromWorksheetXml(xml);
+      if (area) printEntries.push({ sheetIndex, areaDollar: area });
+      if (useDesesMargins) xml = tightenPageMarginsForDeses(xml);
+      xml = ensureSheetPrFitToPage(xml);
+      xml = ensureLandscapeFitToWidthPrint(xml, paperSize);
       zip.file(worksheetPath, xml);
     }
+
+    await patchWorkbookPrintAreas(zip, printEntries);
     return await zip.generateAsync({ type: "uint8array" });
   } catch {
     return sourceBytes;
@@ -327,46 +323,38 @@ function tightenPageMarginsForDeses(xml: string) {
   return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
 }
 
-function ensureSheetPrNoFitToPage(xml: string) {
+function ensureSheetPrFitToPage(xml: string) {
   const pageSetUpPrRegex = /<pageSetUpPr\b[^>]*\/>/;
   if (pageSetUpPrRegex.test(xml)) {
-    return xml.replace(pageSetUpPrRegex, (tag) => upsertXmlAttr(tag, "fitToPage", "0"));
+    return xml.replace(pageSetUpPrRegex, (tag) => upsertXmlAttr(tag, "fitToPage", "1"));
   }
 
   const sheetPrBlockRegex = /<sheetPr\b[^>]*>([\s\S]*?)<\/sheetPr>/;
   if (sheetPrBlockRegex.test(xml)) {
-    return xml.replace(sheetPrBlockRegex, (block) => {
-      if (/<pageSetUpPr\b/.test(block)) {
-        return block.replace(/<pageSetUpPr\b[^>]*\/>/, (tag) =>
-          upsertXmlAttr(tag, "fitToPage", "0"),
-        );
-      }
-      return block.replace("</sheetPr>", '<pageSetUpPr fitToPage="0"/></sheetPr>');
-    });
+    return xml.replace(sheetPrBlockRegex, (block) =>
+      block.replace("</sheetPr>", '<pageSetUpPr fitToPage="1"/></sheetPr>'),
+    );
   }
 
-  return xml.replace(
-    /<worksheet\b[^>]*>/,
-    (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="0"/></sheetPr>`,
-  );
+  return xml.replace(/<worksheet\b[^>]*>/, (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`);
 }
 
-/** Apaisado, tamaño de papel Excel (8=A3, 66=A2), escala %; sin fitToWidth (evita miniatura). */
-function ensureLandscapeScaledPrint(xml: string, paperSize: string, scalePercent: number) {
-  const scaleStr = String(scalePercent);
+/** Apaisado + ajustar a 1 página de ancho (requiere área de impresión acotada). paperSize 8=A3, 66=A2. */
+function ensureLandscapeFitToWidthPrint(xml: string, paperSize: string) {
   const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
   if (pageSetupRegex.test(xml)) {
     return xml.replace(pageSetupRegex, (tag) => {
       let next = stripFitToPageAttrs(tag);
       next = stripScaleFromPageSetupTag(next);
       next = upsertXmlAttr(next, "orientation", "landscape");
+      next = upsertXmlAttr(next, "fitToWidth", "1");
+      next = upsertXmlAttr(next, "fitToHeight", "0");
       next = upsertXmlAttr(next, "paperSize", paperSize);
-      next = upsertXmlAttr(next, "scale", scaleStr);
       return next;
     });
   }
 
-  const insertion = `<pageSetup scale="${scaleStr}" orientation="landscape" paperSize="${paperSize}"/>`;
+  const insertion = `<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="${paperSize}"/>`;
   if (xml.includes("</pageMargins>")) {
     return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
   }
@@ -374,6 +362,122 @@ function ensureLandscapeScaledPrint(xml: string, paperSize: string, scalePercent
     return xml.replace("</sheetData>", `</sheetData>${insertion}`);
   }
   return xml.replace("</worksheet>", `${insertion}</worksheet>`);
+}
+
+type CellBounds = { minR: number; maxR: number; minC: number; maxC: number };
+
+function computeContentBoundsFromWorksheetXml(xml: string): CellBounds | null {
+  const b: CellBounds = { minR: Infinity, maxR: 0, minC: Infinity, maxC: 0 };
+  let any = false;
+
+  const cellRe = /<c\b[^>]*\br="([A-Z]{1,3})(\d+)"/gi;
+  let m: RegExpExecArray | null;
+  while ((m = cellRe.exec(xml)) !== null) {
+    any = true;
+    const c = XLSX.utils.decode_col(m[1]);
+    const r = Number(m[2]) - 1;
+    b.minC = Math.min(b.minC, c);
+    b.maxC = Math.max(b.maxC, c);
+    b.minR = Math.min(b.minR, r);
+    b.maxR = Math.max(b.maxR, r);
+  }
+
+  const mergeRe = /<mergeCell\b[^>]*\bref="([^"]+)"/gi;
+  while ((m = mergeRe.exec(xml)) !== null) {
+    try {
+      const rng = XLSX.utils.decode_range(m[1]);
+      any = true;
+      b.minC = Math.min(b.minC, rng.s.c);
+      b.maxC = Math.max(b.maxC, rng.e.c);
+      b.minR = Math.min(b.minR, rng.s.r);
+      b.maxR = Math.max(b.maxR, rng.e.r);
+    } catch {
+      /* ignore bad merge ref */
+    }
+  }
+
+  if (!any || !Number.isFinite(b.minC)) return null;
+  return b;
+}
+
+function applyTightDimensionFromContent(xml: string, padCols: number, padRows: number): string {
+  const b = computeContentBoundsFromWorksheetXml(xml);
+  if (!b) return xml;
+  b.maxC += padCols;
+  b.maxR += padRows;
+  const ref = XLSX.utils.encode_range({
+    s: { r: b.minR, c: b.minC },
+    e: { r: b.maxR, c: b.maxC },
+  });
+  const dimRe = /<dimension\b[^>]*\/>/;
+  if (dimRe.test(xml)) {
+    return xml.replace(dimRe, `<dimension ref="${ref}"/>`);
+  }
+  if (xml.includes("<sheetData>")) {
+    return xml.replace("<sheetData>", `<dimension ref="${ref}"/><sheetData>`);
+  }
+  return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}<dimension ref="${ref}"/>`);
+}
+
+function getDollarPrintAreaFromWorksheetXml(xml: string): string | null {
+  const dm = xml.match(/<dimension\b[^>]*\bref="([^"]+)"/);
+  if (!dm?.[1]) return null;
+  try {
+    const rng = XLSX.utils.decode_range(dm[1]);
+    const a = `$${XLSX.utils.encode_col(rng.s.c)}$${rng.s.r + 1}`;
+    const b = `$${XLSX.utils.encode_col(rng.e.c)}$${rng.e.r + 1}`;
+    return `${a}:${b}`;
+  } catch {
+    return null;
+  }
+}
+
+function parseSheetNamesInOrder(workbookXml: string): string[] {
+  const tags = workbookXml.match(/<sheet\b[^>]*(?:\/>|>)/gi) ?? [];
+  const names: string[] = [];
+  for (const tag of tags) {
+    const nm = tag.match(/\bname="([^"]*)"/);
+    if (nm?.[1] !== undefined) names.push(nm[1]);
+  }
+  return names;
+}
+
+function quoteSheetNameForRange(name: string): string {
+  if (/[^A-Za-z0-9_.]/.test(name) || /^\d/.test(name)) {
+    return `'${name.replace(/'/g, "''")}'`;
+  }
+  return name;
+}
+
+async function patchWorkbookPrintAreas(
+  zip: JSZip,
+  entries: Array<{ sheetIndex: number; areaDollar: string }>,
+) {
+  if (entries.length === 0) return;
+  const wbFile = zip.file("xl/workbook.xml");
+  if (!wbFile) return;
+  let wb = await wbFile.async("text");
+  const sheetNames = parseSheetNamesInOrder(wb);
+  wb = wb.replace(/<definedName\s+name="_xlnm\.Print_Area"[^>]*\/>/g, "");
+  wb = wb.replace(/<definedName\s+name="_xlnm\.Print_Area"[^>]*>[^<]*<\/definedName>/g, "");
+
+  const newTags = entries
+    .map(({ sheetIndex, areaDollar }) => {
+      const sn = sheetNames[sheetIndex];
+      if (!sn) return "";
+      return `<definedName name="_xlnm.Print_Area" localSheetId="${sheetIndex}">${quoteSheetNameForRange(sn)}!${areaDollar}</definedName>`;
+    })
+    .filter(Boolean)
+    .join("");
+
+  if (!newTags) return;
+
+  if (/<definedNames>[\s\S]*<\/definedNames>/.test(wb)) {
+    wb = wb.replace(/<\/definedNames>/, `${newTags}</definedNames>`);
+  } else {
+    wb = wb.replace(/<\/workbook>/, `<definedNames>${newTags}</definedNames></workbook>`);
+  }
+  zip.file("xl/workbook.xml", wb);
 }
 
 async function resolveFirstWorksheetPath(zip: JSZip) {
