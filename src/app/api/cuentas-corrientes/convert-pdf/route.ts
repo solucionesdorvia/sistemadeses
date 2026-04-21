@@ -46,8 +46,6 @@ export async function POST(request: Request) {
     const { NEXT_PUBLIC_SUPABASE_URL } = getClientEnv();
     const serverEnv = getServerEnv();
     const { SUPABASE_SERVICE_ROLE_KEY } = serverEnv;
-    const forceLandscapePdf = useLandscapeFitForPdf(serverEnv.CONVERT_PDF_FORCE_LANDSCAPE_FIT);
-    const printScalePercent = parsePrintScalePercent(serverEnv.CONVERT_PDF_PRINT_SCALE);
 
     if (!SUPABASE_SERVICE_ROLE_KEY) {
       return Response.json(
@@ -123,8 +121,6 @@ export async function POST(request: Request) {
               sourceBytes,
               fileName: file.name,
               requestCompanyType: body.companyType,
-              forceLandscapePdf,
-              printScalePercent,
             });
             await writeFile(localXlsx, xlsxForPdf);
             await runLibreOfficePdfConversion(localXlsx, tempRoot);
@@ -199,57 +195,27 @@ async function hasSoffice() {
   }
 }
 
-/** Apaisado + fit ancho: activo por defecto; desactivar con 0 / false / no / off. */
-function useLandscapeFitForPdf(value: string | undefined) {
-  if (value === undefined || value.trim() === "") return true;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
-    return false;
-  }
-  return true;
-}
-
-function parsePrintScalePercent(raw: string | undefined) {
-  if (!raw?.trim()) return 100;
-  const n = Number.parseInt(raw.trim(), 10);
-  if (!Number.isFinite(n)) return 100;
-  return Math.min(400, Math.max(10, n));
-}
-
 function isDesesplastResultsXlsx(fileName: string) {
   return fileName.toLowerCase().endsWith("_desesplast.xlsx");
 }
 
 /**
- * Days / Americana: A3 apaisado + fit ancho. Desesplast: A2 + márgenes finos (tablas más anchas).
- * Sin modo apaisado: escala % en la primera hoja para todos.
+ * Siempre apaisado + fit ancho. Days/Americana: A3. Desesplast: A2 + márgenes finos.
  */
 async function buildXlsxBytesForPdf(params: {
   sourceBytes: Uint8Array;
   fileName: string;
   requestCompanyType: Body["companyType"];
-  forceLandscapePdf: boolean;
-  printScalePercent: number;
 }): Promise<Uint8Array> {
-  const {
-    sourceBytes,
-    fileName,
-    requestCompanyType,
-    forceLandscapePdf,
-    printScalePercent,
-  } = params;
+  const { sourceBytes, fileName, requestCompanyType } = params;
 
   const isDesesplast =
     requestCompanyType === "desesplast" || isDesesplastResultsXlsx(fileName);
 
-  if (forceLandscapePdf) {
-    if (isDesesplast) {
-      return forceDesesplastLandscapeAndFitToWidth(sourceBytes);
-    }
-    return forceLandscapeAndFitToWidth(sourceBytes);
+  if (isDesesplast) {
+    return forceDesesplastLandscapeAndFitToWidth(sourceBytes);
   }
-
-  return naturalScalePrintForPdf(sourceBytes, printScalePercent);
+  return forceLandscapeAndFitToWidth(sourceBytes);
 }
 
 async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) {
@@ -280,72 +246,6 @@ async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) 
       maxBuffer: 50 * 1024 * 1024,
     },
   );
-}
-
-/**
- * Desactiva "ajustar hoja a N paginas" (encoge todo) y usa escala % para que el PDF no salga minúsculo.
- */
-async function naturalScalePrintForPdf(sourceBytes: Uint8Array, scalePercent: number) {
-  try {
-    const zip = await JSZip.loadAsync(sourceBytes);
-    const worksheetPath = await resolveFirstWorksheetPath(zip);
-    const worksheetFile = zip.file(worksheetPath);
-    if (!worksheetFile) return sourceBytes;
-
-    let xml = await worksheetFile.async("text");
-    xml = ensureSheetPrNoFitToPage(xml);
-    xml = ensurePageSetupNaturalScale(xml, scalePercent);
-
-    zip.file(worksheetPath, xml);
-    return await zip.generateAsync({ type: "uint8array" });
-  } catch {
-    return sourceBytes;
-  }
-}
-
-function ensureSheetPrNoFitToPage(xml: string) {
-  const pageSetUpPrRegex = /<pageSetUpPr\b[^>]*\/>/;
-  if (pageSetUpPrRegex.test(xml)) {
-    return xml.replace(pageSetUpPrRegex, (tag) => upsertXmlAttr(tag, "fitToPage", "0"));
-  }
-
-  const sheetPrBlockRegex = /<sheetPr\b[^>]*>([\s\S]*?)<\/sheetPr>/;
-  if (sheetPrBlockRegex.test(xml)) {
-    return xml.replace(sheetPrBlockRegex, (block) => {
-      if (/<pageSetUpPr\b/.test(block)) {
-        return block.replace(/<pageSetUpPr\b[^>]*\/>/, (tag) =>
-          upsertXmlAttr(tag, "fitToPage", "0"),
-        );
-      }
-      return block.replace("</sheetPr>", '<pageSetUpPr fitToPage="0"/></sheetPr>');
-    });
-  }
-
-  return xml.replace(
-    /<worksheet\b[^>]*>/,
-    (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="0"/></sheetPr>`,
-  );
-}
-
-function ensurePageSetupNaturalScale(xml: string, scalePercent: number) {
-  const scaleStr = String(scalePercent);
-  const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
-  if (pageSetupRegex.test(xml)) {
-    return xml.replace(pageSetupRegex, (tag) => {
-      let next = stripFitToPageAttrs(tag);
-      next = upsertXmlAttr(next, "scale", scaleStr);
-      return next;
-    });
-  }
-
-  const insertion = `<pageSetup scale="${scaleStr}"/>`;
-  if (xml.includes("</pageMargins>")) {
-    return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
-  }
-  if (xml.includes("</sheetData>")) {
-    return xml.replace("</sheetData>", `</sheetData>${insertion}`);
-  }
-  return xml.replace("</worksheet>", `${insertion}</worksheet>`);
 }
 
 function stripFitToPageAttrs(tag: string) {

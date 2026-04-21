@@ -13,13 +13,6 @@ const serverEnvSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   CONVERTAPI_SECRET: z.string().optional(),
-  /**
-   * PDF cuentas corrientes: apaisado + ajustar a ancho (fitToWidth), todas las hojas.
-   * Days/Americana: A3. Desesplast: A2 + márgenes finos. Por defecto activo. Desactivar: 0/false/no/off.
-   */
-  CONVERT_PDF_FORCE_LANDSCAPE_FIT: z.string().optional(),
-  /** Escala de impresion 10-400 para PDF (default 100). Subir (p. ej. 140) si el texto sale muy chico. */
-  CONVERT_PDF_PRINT_SCALE: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 });
 
@@ -49,8 +42,6 @@ export function getServerEnv() {
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
     GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
     CONVERTAPI_SECRET: process.env.CONVERTAPI_SECRET,
-    CONVERT_PDF_FORCE_LANDSCAPE_FIT: process.env.CONVERT_PDF_FORCE_LANDSCAPE_FIT,
-    CONVERT_PDF_PRINT_SCALE: process.env.CONVERT_PDF_PRINT_SCALE,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   });
 }
