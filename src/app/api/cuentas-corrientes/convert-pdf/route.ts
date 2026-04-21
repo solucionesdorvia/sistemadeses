@@ -46,7 +46,7 @@ export async function POST(request: Request) {
     const { NEXT_PUBLIC_SUPABASE_URL } = getClientEnv();
     const serverEnv = getServerEnv();
     const { SUPABASE_SERVICE_ROLE_KEY } = serverEnv;
-    const forceLandscapePdf = isTruthyEnvFlag(serverEnv.CONVERT_PDF_FORCE_LANDSCAPE_FIT);
+    const forceLandscapePdf = useLandscapeFitForPdf(serverEnv.CONVERT_PDF_FORCE_LANDSCAPE_FIT);
     const printScalePercent = parsePrintScalePercent(serverEnv.CONVERT_PDF_PRINT_SCALE);
 
     if (!SUPABASE_SERVICE_ROLE_KEY) {
@@ -197,10 +197,14 @@ async function hasSoffice() {
   }
 }
 
-function isTruthyEnvFlag(value: string | undefined) {
-  if (!value) return false;
+/** Apaisado + fit ancho: activo por defecto; desactivar con 0 / false / no / off. */
+function useLandscapeFitForPdf(value: string | undefined) {
+  if (value === undefined || value.trim() === "") return true;
   const normalized = value.trim().toLowerCase();
-  return normalized === "1" || normalized === "true" || normalized === "yes";
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  return true;
 }
 
 function parsePrintScalePercent(raw: string | undefined) {

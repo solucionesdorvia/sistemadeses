@@ -13,7 +13,10 @@ const serverEnvSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   CONVERTAPI_SECRET: z.string().optional(),
-  /** Si es "1"/"true"/"yes", fuerza apaisado + fit-to-width al generar PDF (comportamiento viejo). */
+  /**
+   * PDF cuentas corrientes: apaisado + ajustar a ancho (fitToWidth).
+   * Por defecto activo si la variable no está definida. Desactivar: "0", "false", "no", "off".
+   */
   CONVERT_PDF_FORCE_LANDSCAPE_FIT: z.string().optional(),
   /** Escala de impresion 10-400 para PDF (default 100). Subir (p. ej. 140) si el texto sale muy chico. */
   CONVERT_PDF_PRINT_SCALE: z.string().optional(),
