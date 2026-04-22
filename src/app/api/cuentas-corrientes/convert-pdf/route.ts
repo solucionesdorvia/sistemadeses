@@ -222,16 +222,6 @@ async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) 
   );
 }
 
-function stripFitToPageAttrs(tag: string) {
-  return tag
-    .replace(/\s+fitToWidth="[^"]*"/gi, "")
-    .replace(/\s+fitToHeight="[^"]*"/gi, "");
-}
-
-function stripScaleFromPageSetupTag(tag: string) {
-  return tag.replace(/\s+scale="[^"]*"/gi, "");
-}
-
 function listWorksheetXmlPaths(zip: JSZip) {
   return Object.keys(zip.files)
     .filter((p) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(p) && !zip.files[p].dir)
@@ -539,9 +529,8 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
 
       const area = getDollarPrintAreaFromWorksheetXml(xml);
       if (area) printEntries.push({ sheetIndex: localSheetId, areaDollar: area });
-      xml = applyMinimalPageMarginsToWorksheetXml(xml);
       xml = ensureSheetPrFitToPage(xml);
-      xml = ensurePortraitFitToWidthPrint(xml, paperSize);
+      xml = applyOoxmlPrintSectionPortraitA4FitWidth(xml, paperSize);
       zip.file(worksheetPath, xml);
     }
 
@@ -553,18 +542,32 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
   }
 }
 
-/** Más zona útil: márgenes en pulgadas (estándar OOXML) — menos blanco a costados en el PDF. */
-function applyMinimalPageMarginsToWorksheetXml(xml: string): string {
-  const marginTag =
-    '<pageMargins left="0.12" right="0.12" top="0.16" bottom="0.16" header="0.1" footer="0.1"/>';
-  const re = /<pageMargins\b[^>]*\/>/;
-  if (re.test(xml)) {
-    return xml.replace(re, marginTag);
+/**
+ * Reescribe la sección de impresión con orden OOXML válido. Antes, pageMargins/pageSetup
+ * podían quedar *antes* de sheetData o mal enlazados; Calc ignoraba orientación = portrait
+ * y seguía en apaisado. Orden: … datos … → printOptions, pageMargins, pageSetup.
+ */
+function applyOoxmlPrintSectionPortraitA4FitWidth(xml: string, paperSize: string) {
+  let s = xml;
+  s = s.replace(/<printOptions\b[^>]*\/>/gi, "");
+  s = s.replace(/<pageMargins\b[^>]*\/>/gi, "");
+  s = s.replace(/<pageSetup\b[^>]*\/>/gi, "");
+  s = s.replace(/<pageSetup\b[^>]*>[\s\S]*?<\/pageSetup>/gi, "");
+
+  const block = `<printOptions horizontalCentered="0" verticalCentered="0"/>
+<pageMargins left="0.12" right="0.12" top="0.16" bottom="0.16" header="0.1" footer="0.1"/>
+<pageSetup orientation="portrait" fitToWidth="1" fitToHeight="0" paperSize="${paperSize}"/>`;
+
+  if (/<headerFooter\b/i.test(s)) {
+    return s.replace(/<headerFooter\b/i, `${block}\n<headerFooter`);
   }
-  if (xml.includes("<sheetData>")) {
-    return xml.replace("<sheetData>", `${marginTag}<sheetData>`);
+  if (/<drawing\b/i.test(s)) {
+    return s.replace(/<drawing\b/i, `${block}\n<drawing`);
   }
-  return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
+  if (/<legacyDrawing\b/i.test(s)) {
+    return s.replace(/<legacyDrawing\b/i, `${block}\n<legacyDrawing`);
+  }
+  return s.replace(/<\/worksheet>/i, `${block}\n</worksheet>`);
 }
 
 function ensureSheetPrFitToPage(xml: string) {
@@ -581,34 +584,6 @@ function ensureSheetPrFitToPage(xml: string) {
   }
 
   return xml.replace(/<worksheet\b[^>]*>/, (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`);
-}
-
-/**
- * A4 vertical + ajustar al ancho de 1 página (área de impresión acotada).
- * paperSize 9 = A4 (ECMA-376). Varios renglones pueden continuar en páginas siguientes (fitToHeight=0).
- */
-function ensurePortraitFitToWidthPrint(xml: string, paperSize: string) {
-  const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
-  if (pageSetupRegex.test(xml)) {
-    return xml.replace(pageSetupRegex, (tag) => {
-      let next = stripFitToPageAttrs(tag);
-      next = stripScaleFromPageSetupTag(next);
-      next = upsertXmlAttr(next, "orientation", "portrait");
-      next = upsertXmlAttr(next, "fitToWidth", "1");
-      next = upsertXmlAttr(next, "fitToHeight", "0");
-      next = upsertXmlAttr(next, "paperSize", paperSize);
-      return next;
-    });
-  }
-
-  const insertion = `<pageSetup orientation="portrait" fitToWidth="1" fitToHeight="0" paperSize="${paperSize}"/>`;
-  if (xml.includes("</pageMargins>")) {
-    return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
-  }
-  if (xml.includes("</sheetData>")) {
-    return xml.replace("</sheetData>", `</sheetData>${insertion}`);
-  }
-  return xml.replace("</worksheet>", `${insertion}</worksheet>`);
 }
 
 type CellBounds = { minR: number; maxR: number; minC: number; maxC: number };
