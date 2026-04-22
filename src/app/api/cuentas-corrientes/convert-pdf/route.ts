@@ -306,12 +306,39 @@ function trimXlsxWorkbookToTightDataBytes(sourceBytes: Uint8Array): Uint8Array {
     const again = getTightRangeFromSheetData(sheet);
     if (again) {
       sheet["!ref"] = XLSX.utils.encode_range(again);
+      applyUniformColumnWidthsForPrint(sheet, again);
     } else {
       delete sheet["!ref"];
     }
+    (sheet as XLSX.WorkSheet)["!margins"] = {
+      left: 0.12,
+      right: 0.12,
+      top: 0.16,
+      bottom: 0.16,
+      header: 0.1,
+      footer: 0.1,
+    };
   }
   const out = XLSX.write(wb, { bookType: "xlsx", type: "array", cellStyles: true });
   return new Uint8Array(out as ArrayBuffer);
+}
+
+/**
+ * Anchos uniformes y moderados: reduce el ancho lógico total; al ajustar a 1 pág. de ancho,
+ * Calc aplica un zoom mayor = texto más legible, menos "miniatura".
+ * Columnas a la izquierda del rango: ocultas (no aportan ancho al layout).
+ */
+function applyUniformColumnWidthsForPrint(sheet: XLSX.WorkSheet, rng: XLSX.Range) {
+  const WCH = 10;
+  const cols: XLSX.ColInfo[] = [];
+  for (let c = 0; c <= rng.e.c; c += 1) {
+    if (c < rng.s.c) {
+      cols.push({ hidden: true, wch: 0, width: 0 });
+    } else {
+      cols.push({ wch: WCH });
+    }
+  }
+  sheet["!cols"] = cols;
 }
 
 type WorkbookWorksheetRef = {
@@ -511,7 +538,7 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
 
       const area = getDollarPrintAreaFromWorksheetXml(xml);
       if (area) printEntries.push({ sheetIndex: localSheetId, areaDollar: area });
-      xml = stripWorksheetColsBlock(xml);
+      xml = applyMinimalPageMarginsToWorksheetXml(xml);
       xml = ensureSheetPrFitToPage(xml);
       xml = ensureLandscapeFitToWidthPrint(xml, paperSize);
       zip.file(worksheetPath, xml);
@@ -525,9 +552,18 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
   }
 }
 
-/** `cols` fija ancho/alcance de columnas; a veces abarca miles y Calc “reserva” franja a la derecha. */
-function stripWorksheetColsBlock(xml: string): string {
-  return xml.replace(/<cols\b[^>]*>[\s\S]*?<\/cols>/gi, "");
+/** Más zona útil: márgenes en pulgadas (estándar OOXML) — menos blanco a costados en el PDF. */
+function applyMinimalPageMarginsToWorksheetXml(xml: string): string {
+  const marginTag =
+    '<pageMargins left="0.12" right="0.12" top="0.16" bottom="0.16" header="0.1" footer="0.1"/>';
+  const re = /<pageMargins\b[^>]*\/>/;
+  if (re.test(xml)) {
+    return xml.replace(re, marginTag);
+  }
+  if (xml.includes("<sheetData>")) {
+    return xml.replace("<sheetData>", `${marginTag}<sheetData>`);
+  }
+  return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
 }
 
 function ensureSheetPrFitToPage(xml: string) {
