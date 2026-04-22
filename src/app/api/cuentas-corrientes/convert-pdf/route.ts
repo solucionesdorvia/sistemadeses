@@ -251,7 +251,67 @@ function listWorksheetXmlPaths(zip: JSZip) {
  * predecible para Calc al exportar PDF.
  */
 async function prepareCuentaCorrienteXlsxForPdf(sourceBytes: Uint8Array) {
-  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "8");
+  let bytes = sourceBytes;
+  try {
+    // Quita celdas y columnas “fantasma” a la derecha: Calc reserva ancho aunque la celda
+    // esté vacía, y <cols> hace el PDF con franja blanca + texto minúsculo al fit a ancho.
+    bytes = trimXlsxWorkbookToTightDataBytes(sourceBytes);
+  } catch (err) {
+    console.error("[convert-pdf] trimXlsxWorkbookToTightDataBytes", err);
+  }
+  return preparePdfWorkbookWithTightPrintArea(bytes, "8");
+}
+
+/** Elimina celdas fuera del rango con contenido y metadatos de columnas que ensanchan la grilla. */
+function trimXlsxWorkbookToTightDataBytes(sourceBytes: Uint8Array): Uint8Array {
+  const wb = XLSX.read(sourceBytes, {
+    type: "array",
+    cellDates: true,
+    cellNF: true,
+    cellFormula: true,
+    cellStyles: true,
+  });
+  for (const name of wb.SheetNames) {
+    const sheet = wb.Sheets[name];
+    if (!sheet) continue;
+    const rng = getTightRangeFromSheetData(sheet);
+    if (!rng) continue;
+    for (const key of Object.keys(sheet)) {
+      if (key.startsWith("!")) continue;
+      if (!/^[A-Za-z]+\d+$/.test(key)) continue;
+      let cell: { c: number; r: number };
+      try {
+        cell = XLSX.utils.decode_cell(key);
+      } catch {
+        delete (sheet as Record<string, unknown>)[key];
+        continue;
+      }
+      if (
+        cell.c < rng.s.c ||
+        cell.c > rng.e.c ||
+        cell.r < rng.s.r ||
+        cell.r > rng.e.r
+      ) {
+        delete (sheet as Record<string, unknown>)[key];
+      }
+    }
+    const merges = sheet["!merges"] as XLSX.Range[] | undefined;
+    if (merges?.length) {
+      sheet["!merges"] = merges.filter(
+        (m) =>
+          m.s.c >= rng.s.c && m.e.c <= rng.e.c && m.s.r >= rng.s.r && m.e.r <= rng.e.r,
+      );
+    }
+    delete (sheet as { "!cols"?: unknown })["!cols"];
+    const again = getTightRangeFromSheetData(sheet);
+    if (again) {
+      sheet["!ref"] = XLSX.utils.encode_range(again);
+    } else {
+      delete sheet["!ref"];
+    }
+  }
+  const out = XLSX.write(wb, { bookType: "xlsx", type: "array", cellStyles: true });
+  return new Uint8Array(out as ArrayBuffer);
 }
 
 type WorkbookWorksheetRef = {
@@ -330,7 +390,7 @@ function sheetCellHasMeaningfulContent(cell: XLSX.CellObject | undefined): boole
   if (cell.f) return true;
   if (cell.w != null && String(cell.w).trim() !== "") return true;
   if (cell.v === undefined) return false;
-  if (typeof cell.v === "string" && cell.v === "") return false;
+  if (typeof cell.v === "string" && cell.v.trim() === "") return false;
   if (cell.t === "z") return false;
   if (cell.t === "e" && (cell as { w?: string }).w) return true;
   return true;
@@ -451,6 +511,7 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
 
       const area = getDollarPrintAreaFromWorksheetXml(xml);
       if (area) printEntries.push({ sheetIndex: localSheetId, areaDollar: area });
+      xml = stripWorksheetColsBlock(xml);
       xml = ensureSheetPrFitToPage(xml);
       xml = ensureLandscapeFitToWidthPrint(xml, paperSize);
       zip.file(worksheetPath, xml);
@@ -462,6 +523,11 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
     console.error("[convert-pdf] preparePdfWorkbookWithTightPrintArea", err);
     return sourceBytes;
   }
+}
+
+/** `cols` fija ancho/alcance de columnas; a veces abarca miles y Calc “reserva” franja a la derecha. */
+function stripWorksheetColsBlock(xml: string): string {
+  return xml.replace(/<cols\b[^>]*>[\s\S]*?<\/cols>/gi, "");
 }
 
 function ensureSheetPrFitToPage(xml: string) {
