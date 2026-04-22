@@ -10,6 +10,7 @@ import JSZip from "jszip";
 import * as XLSX from "xlsx";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
+import { refitPdfToA4Portrait } from "@/lib/pdf/refitToA4Portrait";
 import { createClient } from "@/lib/supabase/server";
 
 const execFileAsync = promisify(execFile);
@@ -123,7 +124,8 @@ export async function POST(request: Request) {
             await runLibreOfficePdfConversion(localXlsx, tempRoot);
             let pdfBytes: Buffer;
             try {
-              pdfBytes = Buffer.from(await readFile(localPdf));
+              const rawLoPdf = await readFile(localPdf);
+              pdfBytes = await refitPdfToA4Portrait(Buffer.from(rawLoPdf));
             } catch (err) {
               const code =
                 err && typeof err === "object" && "code" in err
