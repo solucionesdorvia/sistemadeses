@@ -259,7 +259,8 @@ async function prepareCuentaCorrienteXlsxForPdf(sourceBytes: Uint8Array) {
   } catch (err) {
     console.error("[convert-pdf] trimXlsxWorkbookToTightDataBytes", err);
   }
-  return preparePdfWorkbookWithTightPrintArea(bytes, "8");
+  // A4 vertical: el listado suele caber en el ancho útil (~21 cm); antes A3 apaisado dejaba mucho blanco.
+  return preparePdfWorkbookWithTightPrintArea(bytes, "9");
 }
 
 /** Elimina celdas fuera del rango con contenido y metadatos de columnas que ensanchan la grilla. */
@@ -540,7 +541,7 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
       if (area) printEntries.push({ sheetIndex: localSheetId, areaDollar: area });
       xml = applyMinimalPageMarginsToWorksheetXml(xml);
       xml = ensureSheetPrFitToPage(xml);
-      xml = ensureLandscapeFitToWidthPrint(xml, paperSize);
+      xml = ensurePortraitFitToWidthPrint(xml, paperSize);
       zip.file(worksheetPath, xml);
     }
 
@@ -582,14 +583,17 @@ function ensureSheetPrFitToPage(xml: string) {
   return xml.replace(/<worksheet\b[^>]*>/, (tag) => `${tag}<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>`);
 }
 
-/** Apaisado + ajustar a 1 página de ancho (requiere área de impresión acotada). paperSize 8=A3. */
-function ensureLandscapeFitToWidthPrint(xml: string, paperSize: string) {
+/**
+ * A4 vertical + ajustar al ancho de 1 página (área de impresión acotada).
+ * paperSize 9 = A4 (ECMA-376). Varios renglones pueden continuar en páginas siguientes (fitToHeight=0).
+ */
+function ensurePortraitFitToWidthPrint(xml: string, paperSize: string) {
   const pageSetupRegex = /<pageSetup\b[^>]*\/>/;
   if (pageSetupRegex.test(xml)) {
     return xml.replace(pageSetupRegex, (tag) => {
       let next = stripFitToPageAttrs(tag);
       next = stripScaleFromPageSetupTag(next);
-      next = upsertXmlAttr(next, "orientation", "landscape");
+      next = upsertXmlAttr(next, "orientation", "portrait");
       next = upsertXmlAttr(next, "fitToWidth", "1");
       next = upsertXmlAttr(next, "fitToHeight", "0");
       next = upsertXmlAttr(next, "paperSize", paperSize);
@@ -597,7 +601,7 @@ function ensureLandscapeFitToWidthPrint(xml: string, paperSize: string) {
     });
   }
 
-  const insertion = `<pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0" paperSize="${paperSize}"/>`;
+  const insertion = `<pageSetup orientation="portrait" fitToWidth="1" fitToHeight="0" paperSize="${paperSize}"/>`;
   if (xml.includes("</pageMargins>")) {
     return xml.replace("</pageMargins>", `</pageMargins>${insertion}`);
   }
