@@ -336,16 +336,62 @@ async function fallbackWorksheetTargetsWithoutWorkbookOrder(
   return list.map((worksheetPath, i) => ({ localSheetId: i, worksheetPath }));
 }
 
-/** Rango usado por SheetJS a partir de celdas reales + merges (más fiable que regex XML en .xls→xlsx). */
-function getTightRangeFromSheet(sheet: XLSX.WorkSheet): XLSX.Range | null {
-  const rawRef = sheet["!ref"];
-  if (!rawRef) return null;
-  let rng: XLSX.Range;
-  try {
-    rng = XLSX.utils.decode_range(rawRef);
-  } catch {
-    return null;
+function isRangeSubset(inner: XLSX.Range, outer: XLSX.Range): boolean {
+  return (
+    inner.s.c >= outer.s.c &&
+    inner.s.r >= outer.s.r &&
+    inner.e.c <= outer.e.c &&
+    inner.e.r <= outer.e.r
+  );
+}
+
+function rangeFromCellBounds(b: CellBounds): XLSX.Range {
+  return { s: { c: b.minC, r: b.minR }, e: { c: b.maxC, r: b.maxR } };
+}
+
+/** Celdas con dato/ fórmula / texto; ignora celdas vacías con solo estilo (anchura fantasma en .xls). */
+function sheetCellHasMeaningfulContent(cell: XLSX.CellObject | undefined): boolean {
+  if (!cell) return false;
+  if (cell.f) return true;
+  if (cell.w != null && String(cell.w).trim() !== "") return true;
+  if (cell.v === undefined) return false;
+  if (typeof cell.v === "string" && cell.v === "") return false;
+  if (cell.t === "z") return false;
+  if (cell.t === "e" && (cell as { w?: string }).w) return true;
+  return true;
+}
+
+/**
+ * Rango solo desde celdas “con contenido” + merges, sin confiar en !ref
+ * (a veces incluye columna ZZ vacía o estilada).
+ */
+function getTightRangeFromSheetData(sheet: XLSX.WorkSheet): XLSX.Range | null {
+  const keys = Object.keys(sheet).filter((k) => !k.startsWith("!"));
+  if (keys.length === 0) return null;
+
+  let minC = Infinity;
+  let minR = Infinity;
+  let maxC = 0;
+  let maxR = 0;
+  let any = false;
+  for (const addr of keys) {
+    if (!/^[A-Za-z]+\d+$/.test(addr)) continue;
+    if (!sheetCellHasMeaningfulContent(sheet[addr] as XLSX.CellObject)) continue;
+    let cell: { c: number; r: number };
+    try {
+      cell = XLSX.utils.decode_cell(addr);
+    } catch {
+      continue;
+    }
+    any = true;
+    minC = Math.min(minC, cell.c);
+    minR = Math.min(minR, cell.r);
+    maxC = Math.max(maxC, cell.c);
+    maxR = Math.max(maxR, cell.r);
   }
+  if (!any || !Number.isFinite(minC)) return null;
+
+  let rng: XLSX.Range = { s: { c: minC, r: minR }, e: { c: maxC, r: maxR } };
   const merges = sheet["!merges"] as XLSX.Range[] | undefined;
   if (merges?.length) {
     for (const m of merges) {
@@ -356,6 +402,31 @@ function getTightRangeFromSheet(sheet: XLSX.WorkSheet): XLSX.Range | null {
     }
   }
   return rng;
+}
+
+function unionRange(a: XLSX.Range, b: XLSX.Range): XLSX.Range {
+  return {
+    s: { c: Math.min(a.s.c, b.s.c), r: Math.min(a.s.r, b.s.r) },
+    e: { c: Math.max(a.e.c, b.e.c), r: Math.max(a.e.r, b.e.r) },
+  };
+}
+
+/**
+ * Rango útil: xml (hoja) vs objeto SheetJS; el subconjunto más ajustado que sigue conteniendo datos.
+ * Deses/.xls→xlsx: !ref a menudo ancho; el XML a veces omite r= en celdas.
+ */
+function pickTightPrintRange(
+  fromSheet: XLSX.Range | null,
+  fromXml: CellBounds | null,
+): XLSX.Range | null {
+  if (fromXml) {
+    const rXml = rangeFromCellBounds(fromXml);
+    if (!fromSheet) return rXml;
+    if (isRangeSubset(rXml, fromSheet)) return rXml;
+    if (isRangeSubset(fromSheet, rXml)) return fromSheet;
+    return unionRange(fromSheet, rXml);
+  }
+  return fromSheet;
 }
 
 async function preparePdfWorkbookWithTightPrintArea(
@@ -395,10 +466,12 @@ async function preparePdfWorkbookWithTightPrintArea(
       if (!worksheetFile) continue;
       let xml = await worksheetFile.async("text");
 
-      let range: XLSX.Range | null = null;
+      const xmlBounds = computeTightContentBoundsFromWorksheetXml(xml);
+      let fromSheet: XLSX.Range | null = null;
       if (wb && sheetName && wb.Sheets[sheetName]) {
-        range = getTightRangeFromSheet(wb.Sheets[sheetName]);
+        fromSheet = getTightRangeFromSheetData(wb.Sheets[sheetName]);
       }
+      const range = pickTightPrintRange(fromSheet, xmlBounds);
       if (range) {
         xml = applyTightDimensionFromRange(xml, range, 1, 1);
       } else {
@@ -477,38 +550,106 @@ function ensureLandscapeFitToWidthPrint(xml: string, paperSize: string) {
 
 type CellBounds = { minR: number; maxR: number; minC: number; maxC: number };
 
-function computeContentBoundsFromWorksheetXml(xml: string): CellBounds | null {
-  const b: CellBounds = { minR: Infinity, maxR: 0, minC: Infinity, maxC: 0 };
+function mergeCellBounds(a: CellBounds | null, b: CellBounds | null): CellBounds | null {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    minC: Math.min(a.minC, b.minC),
+    minR: Math.min(a.minR, b.minR),
+    maxC: Math.max(a.maxC, b.maxC),
+    maxR: Math.max(a.maxR, b.maxR),
+  };
+}
+
+function expandBoundsWithPoint(b: CellBounds, c: number, r: number): void {
+  b.minC = Math.min(b.minC, c);
+  b.maxC = Math.max(b.maxC, c);
+  b.minR = Math.min(b.minR, r);
+  b.maxR = Math.max(b.maxR, r);
+}
+
+/**
+ * Incluye <c r="..."> (mayúsc/minúsc), mergeCells, y celdas sin r= (orden OOXML en la fila).
+ * En .xls→.xlsx LibreOffice/SheetJS a veces omiten r= o dejan !ref enorme.
+ */
+function computeTightContentBoundsFromWorksheetXml(xml: string): CellBounds | null {
+  let b: CellBounds | null = null;
   let any = false;
 
-  const cellRe = /<c\b[^>]*\br="([A-Z]{1,3})(\d+)"/gi;
+  const cellRe = /<c\b[^>]*\br="([A-Za-z]+)(\d+)"/gi;
   let m: RegExpExecArray | null;
   while ((m = cellRe.exec(xml)) !== null) {
+    if (!b) b = { minR: Infinity, maxR: 0, minC: Infinity, maxC: 0 };
     any = true;
-    const c = XLSX.utils.decode_col(m[1]);
-    const r = Number(m[2]) - 1;
-    b.minC = Math.min(b.minC, c);
-    b.maxC = Math.max(b.maxC, c);
-    b.minR = Math.min(b.minR, r);
-    b.maxR = Math.max(b.maxR, r);
+    const col = XLSX.utils.decode_col(m[1].toUpperCase());
+    const row = Number(m[2]) - 1;
+    expandBoundsWithPoint(b, col, row);
   }
 
   const mergeRe = /<mergeCell\b[^>]*\bref="([^"]+)"/gi;
   while ((m = mergeRe.exec(xml)) !== null) {
     try {
       const rng = XLSX.utils.decode_range(m[1]);
+      if (!b) b = { minR: Infinity, maxR: 0, minC: Infinity, maxC: 0 };
       any = true;
-      b.minC = Math.min(b.minC, rng.s.c);
-      b.maxC = Math.max(b.maxC, rng.e.c);
-      b.minR = Math.min(b.minR, rng.s.r);
-      b.maxR = Math.max(b.maxR, rng.e.r);
+      b.minC = Math.min(b.minC, rng.s.c, rng.e.c);
+      b.maxC = Math.max(b.maxC, rng.s.c, rng.e.c);
+      b.minR = Math.min(b.minR, rng.s.r, rng.e.r);
+      b.maxR = Math.max(b.maxR, rng.s.r, rng.e.r);
     } catch {
       /* ignore bad merge ref */
     }
   }
 
-  if (!any || !Number.isFinite(b.minC)) return null;
+  const implicit = computeImplicitContentBoundsFromSheetDataXml(xml);
+  b = mergeCellBounds(b, implicit);
+  if (implicit) any = true;
+
+  if (!any || !b || !Number.isFinite(b.minC)) return null;
   return b;
+}
+
+/** Celdas sin r= en <sheetData> (columna implícita según ECMA-376 / LibreOffice). */
+function computeImplicitContentBoundsFromSheetDataXml(worksheetXml: string): CellBounds | null {
+  const inner = worksheetXml.match(/<sheetData>([\s\S]*?)<\/sheetData>/i)?.[1];
+  if (!inner) return null;
+
+  let b: CellBounds | null = null;
+  const rowRe = /<row(\s[^>]*)>([\s\S]*?)<\/row>/gi;
+  let rm: RegExpExecArray | null;
+  while ((rm = rowRe.exec(inner)) !== null) {
+    const rowAttrs = rm[1] ?? "";
+    const content = rm[2] ?? "";
+    const rowM = rowAttrs.match(/\br="(\d+)"/i);
+    let row0: number | null = rowM?.[1] ? Number(rowM[1]) - 1 : null;
+    if (row0 === null) {
+      const firstC = content.match(/<c[^>]*\br="[A-Za-z]+(\d+)"/i);
+      if (firstC?.[1]) row0 = Number(firstC[1]) - 1;
+    }
+    if (row0 === null) continue;
+
+    let nextCol = 0;
+    const cTags = content.matchAll(/<c[^>]*>/g);
+    for (const cm of cTags) {
+      const openTag = cm[0];
+      const refMatch = openTag.match(/\br="([A-Za-z]+)(\d+)"/i);
+      let col: number;
+      if (refMatch?.[1]) {
+        col = XLSX.utils.decode_col(refMatch[1].toUpperCase());
+        nextCol = col + 1;
+      } else {
+        col = nextCol;
+        nextCol += 1;
+      }
+      if (!b) b = { minR: Infinity, maxR: 0, minC: Infinity, maxC: 0 };
+      expandBoundsWithPoint(b, col, row0);
+    }
+  }
+  return b;
+}
+
+function computeContentBoundsFromWorksheetXml(xml: string): CellBounds | null {
+  return computeTightContentBoundsFromWorksheetXml(xml);
 }
 
 function applyTightDimensionFromRange(
