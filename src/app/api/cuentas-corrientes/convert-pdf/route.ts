@@ -118,11 +118,7 @@ export async function POST(request: Request) {
           const localPdf = join(tempRoot, basename(file.name).replace(/\.xlsx$/i, ".pdf"));
 
           try {
-            const xlsxForPdf = await buildXlsxBytesForPdf({
-              sourceBytes,
-              fileName: file.name,
-              requestCompanyType: body.companyType,
-            });
+            const xlsxForPdf = await prepareCuentaCorrienteXlsxForPdf(sourceBytes);
             await writeFile(localXlsx, xlsxForPdf);
             await runLibreOfficePdfConversion(localXlsx, tempRoot);
             let pdfBytes: Buffer;
@@ -196,30 +192,6 @@ async function hasSoffice() {
   }
 }
 
-function isDesesplastResultsXlsx(fileName: string) {
-  return fileName.toLowerCase().endsWith("_desesplast.xlsx");
-}
-
-/**
- * Área de impresión ajustada al contenido + fit ancho en papel grande.
- * Sin esto, el "área" implícita es enorme y el PDF deja bandas vacías o escala mal.
- */
-async function buildXlsxBytesForPdf(params: {
-  sourceBytes: Uint8Array;
-  fileName: string;
-  requestCompanyType: Body["companyType"];
-}): Promise<Uint8Array> {
-  const { sourceBytes, fileName, requestCompanyType } = params;
-
-  const isDesesplast =
-    requestCompanyType === "desesplast" || isDesesplastResultsXlsx(fileName);
-
-  if (isDesesplast) {
-    return prepareDesesplastPdfPrint(sourceBytes);
-  }
-  return prepareDaysAmericanaPdfPrint(sourceBytes);
-}
-
 async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) {
   const profileDir = join(tempRoot, "lo-profile");
   const userInstallation = pathToFileURL(profileDir).href;
@@ -270,13 +242,16 @@ function listWorksheetXmlPaths(zip: JSZip) {
     });
 }
 
-async function prepareDaysAmericanaPdfPrint(sourceBytes: Uint8Array) {
-  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "8", false);
-}
-
-async function prepareDesesplastPdfPrint(sourceBytes: Uint8Array) {
-  // Mismo tamaño que Days: A2 dejaba página muy ancha y la grilla se veía “chica” con franjas.
-  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "8", true);
+/**
+ * Preproceso XLSX → PDF (LibreOffice). Misma lógica para Days, Deses y Americana.
+ *
+ * El motivo por el que Deses fallaba más que Days no era un flag distinto en este endpoint,
+ * sino el origen del workbook: Deses suele venir de `.xls` → `.xlsx` (SheetJS o LibreOffice),
+ * con `dimension`/`!ref` amplios o celdas implícitas; Days suele ser `.xlsx` de Excel, más
+ * predecible para Calc al exportar PDF.
+ */
+async function prepareCuentaCorrienteXlsxForPdf(sourceBytes: Uint8Array) {
+  return preparePdfWorkbookWithTightPrintArea(sourceBytes, "8");
 }
 
 type WorkbookWorksheetRef = {
@@ -429,11 +404,7 @@ function pickTightPrintRange(
   return fromSheet;
 }
 
-async function preparePdfWorkbookWithTightPrintArea(
-  sourceBytes: Uint8Array,
-  paperSize: string,
-  useDesesMargins: boolean,
-) {
+async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, paperSize: string) {
   try {
     const zip = await JSZip.loadAsync(sourceBytes);
     let wb: XLSX.WorkBook | null = null;
@@ -480,7 +451,6 @@ async function preparePdfWorkbookWithTightPrintArea(
 
       const area = getDollarPrintAreaFromWorksheetXml(xml);
       if (area) printEntries.push({ sheetIndex: localSheetId, areaDollar: area });
-      if (useDesesMargins) xml = tightenPageMarginsForDeses(xml);
       xml = ensureSheetPrFitToPage(xml);
       xml = ensureLandscapeFitToWidthPrint(xml, paperSize);
       zip.file(worksheetPath, xml);
@@ -492,19 +462,6 @@ async function preparePdfWorkbookWithTightPrintArea(
     console.error("[convert-pdf] preparePdfWorkbookWithTightPrintArea", err);
     return sourceBytes;
   }
-}
-
-function tightenPageMarginsForDeses(xml: string) {
-  const marginTag =
-    '<pageMargins left="0.1" right="0.1" top="0.2" bottom="0.2" header="0.1" footer="0.1"/>';
-  const re = /<pageMargins\b[^>]*\/>/;
-  if (re.test(xml)) {
-    return xml.replace(re, marginTag);
-  }
-  if (xml.includes("</sheetData>")) {
-    return xml.replace("</sheetData>", `</sheetData>${marginTag}`);
-  }
-  return xml.replace(/<worksheet\b[^>]*>/, (t) => `${t}${marginTag}`);
 }
 
 function ensureSheetPrFitToPage(xml: string) {
