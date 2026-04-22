@@ -547,25 +547,40 @@ async function preparePdfWorkbookWithTightPrintArea(sourceBytes: Uint8Array, pap
  * podían quedar *antes* de sheetData o mal enlazados; Calc ignoraba orientación = portrait
  * y seguía en apaisado. Orden: … datos … → printOptions, pageMargins, pageSetup.
  */
+/** Incluye tags con prefijo XML (`x:pageSetup`): si no se borran, Calc sigue el papel/orientación viejos. */
+function stripWorksheetPrintElementsAllForms(s: string): string {
+  let out = s;
+  const selfClose = (local: string) =>
+    new RegExp(`<(?:[\\w.-]+:)?${local}\\b[^>]*/>`, "gi");
+  const paired = (local: string) =>
+    new RegExp(
+      `<(?:[\\w.-]+:)?${local}\\b[^>]*>[\\s\\S]*?</(?:[\\w.-]+:)?${local}>`,
+      "gi",
+    );
+  for (const name of ["printOptions", "pageMargins", "pageSetup"] as const) {
+    out = out.replace(selfClose(name), "");
+    out = out.replace(paired(name), "");
+  }
+  return out;
+}
+
 function applyOoxmlPrintSectionPortraitA4FitWidth(xml: string, paperSize: string) {
-  let s = xml;
-  s = s.replace(/<printOptions\b[^>]*\/>/gi, "");
-  s = s.replace(/<pageMargins\b[^>]*\/>/gi, "");
-  s = s.replace(/<pageSetup\b[^>]*\/>/gi, "");
-  s = s.replace(/<pageSetup\b[^>]*>[\s\S]*?<\/pageSetup>/gi, "");
+  let s = stripWorksheetPrintElementsAllForms(xml);
 
   const block = `<printOptions horizontalCentered="0" verticalCentered="0"/>
 <pageMargins left="0.12" right="0.12" top="0.16" bottom="0.16" header="0.1" footer="0.1"/>
 <pageSetup orientation="portrait" fitToWidth="1" fitToHeight="0" paperSize="${paperSize}"/>`;
 
-  if (/<headerFooter\b/i.test(s)) {
-    return s.replace(/<headerFooter\b/i, `${block}\n<headerFooter`);
+  const insertBefore = (re: RegExp) => s.replace(re, (m) => `${block}\n${m}`);
+
+  if (/<(?:[\w.-]+:)?headerFooter\b/i.test(s)) {
+    return insertBefore(/<(?:[\w.-]+:)?headerFooter\b/i);
   }
-  if (/<drawing\b/i.test(s)) {
-    return s.replace(/<drawing\b/i, `${block}\n<drawing`);
+  if (/<(?:[\w.-]+:)?drawing\b/i.test(s)) {
+    return insertBefore(/<(?:[\w.-]+:)?drawing\b/i);
   }
-  if (/<legacyDrawing\b/i.test(s)) {
-    return s.replace(/<legacyDrawing\b/i, `${block}\n<legacyDrawing`);
+  if (/<(?:[\w.-]+:)?legacyDrawing\b/i.test(s)) {
+    return insertBefore(/<(?:[\w.-]+:)?legacyDrawing\b/i);
   }
   return s.replace(/<\/worksheet>/i, `${block}\n</worksheet>`);
 }
