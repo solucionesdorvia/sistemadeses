@@ -5,13 +5,6 @@ import type { CompanyType } from "@/lib/types/domain";
 import JSZip from "jszip";
 import { invokeEdgeFunction } from "@/modules/vendors/services/edge-client-service";
 
-type ConvertPdfResponse = {
-  ok: boolean;
-  converted: number;
-  errors: Array<{ vendor: string; file: string; reason: string }>;
-  message?: string;
-};
-
 export async function uploadCuentaCorrienteFiles(
   files: File[],
   companyType: CompanyType,
@@ -64,17 +57,16 @@ export async function uploadCuentaCorrienteFiles(
       throw new Error(payload.message ?? "Error al procesar cuentas corrientes.");
     }
 
-    // Conversion local opcional a PDF para vendedores con "convertToPdf = true".
     const convertPayload = await triggerPdfConversion({ companyType });
     if (!convertPayload.ok) {
       console.warn(
-        "[convert-pdf] No se pudo convertir a PDF, el XLSX permanece disponible:",
+        "[convert-pdf] Microsoft Graph no genero PDF:",
         convertPayload.message ?? "Error desconocido",
       );
     } else if (convertPayload.errors.length > 0) {
       console.warn(
-        "[convert-pdf] Conversion parcial con errores:",
-        convertPayload.errors.map((item) => `${item.vendor}: ${item.reason}`).join(" | "),
+        "[convert-pdf] Errores parciales:",
+        convertPayload.errors.map((i) => `${i.vendor}: ${i.reason}`).join(" | "),
       );
     }
   } catch (error) {
@@ -105,7 +97,7 @@ async function normalizeCuentaCorrienteInputFile(file: File) {
     throw new Error(`Formato no soportado: ${file.name}`);
   }
 
-  // .xls -> .xlsx: primero LibreOffice (fidelidad para PDF); si falla, SheetJS.
+  // .xls -> .xlsx: primero LibreOffice; si falla, SheetJS.
   const formData = new FormData();
   formData.append("file", file);
 
@@ -128,6 +120,13 @@ async function normalizeCuentaCorrienteInputFile(file: File) {
     lastModified: Date.now(),
   });
 }
+
+type ConvertPdfResponse = {
+  ok: boolean;
+  converted: number;
+  errors: Array<{ vendor: string; file: string; reason: string }>;
+  message?: string;
+};
 
 export async function triggerPdfConversion(params: {
   companyType?: CompanyType;

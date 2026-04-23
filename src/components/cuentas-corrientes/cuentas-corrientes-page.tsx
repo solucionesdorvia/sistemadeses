@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Download,
+  FileText,
   Loader2,
   Mail,
   RefreshCcw,
@@ -447,31 +448,31 @@ export function CuentasCorrientesPage() {
                       <Button
                         size="icon"
                         variant="ghost"
-                        title="Generar PDF vendedor"
+                        title="Generar PDF (Microsoft 365 / Graph)"
                         onClick={async () => {
                           try {
                             const response = await triggerPdfConversion({
                               vendorName: vendor.normalizedName,
                             });
                             if (response.converted > 0) {
-                              toast.success(`PDF generado (${response.converted}).`);
+                              toast.success(`PDF generado (${response.converted}) con Microsoft 365.`);
                             } else if (response.errors.length > 0) {
                               toast.error(
-                                `Fallido: ${response.errors[0]?.vendor} - ${response.errors[0]?.reason ?? "Error"}`,
+                                `Fallo: ${response.errors[0]?.vendor} — ${response.errors[0]?.reason ?? "Error"}`,
                               );
+                            } else if (!response.ok && response.message) {
+                              toast.error(response.message);
                             } else {
-                              toast.error("No se encontraron archivos para convertir.");
+                              toast.error("No se encontraron XLSX para convertir o Graph no esta configurado.");
                             }
                           } catch (error) {
                             toast.error(
-                              error instanceof Error
-                                ? error.message
-                                : "Error al generar PDF del vendedor.",
+                              error instanceof Error ? error.message : "Error al generar PDF.",
                             );
                           }
                         }}
                       >
-                        <Archive className="size-4" />
+                        <FileText className="size-4" />
                       </Button>
                     </div>
                   </CollapsibleTrigger>
@@ -514,7 +515,7 @@ export function CuentasCorrientesPage() {
                       <TableHead>Vendedor</TableHead>
                       <TableHead>Email</TableHead>
                       <TableHead>Carpeta Drive</TableHead>
-                      <TableHead>PDF</TableHead>
+                      <TableHead>PDF (M365)</TableHead>
                       <TableHead>Acciones</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -712,7 +713,6 @@ function VendorConfigRow({
               <SelectItem value="true">Si</SelectItem>
             </SelectContent>
           </Select>
-          <p className="text-[11px] text-muted-foreground">Actual: {convertToPdf ? "Si" : "No"}</p>
         </div>
       </TableCell>
       <TableCell>

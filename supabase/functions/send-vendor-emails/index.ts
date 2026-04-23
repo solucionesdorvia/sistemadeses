@@ -123,9 +123,7 @@ async function loadVendorAttachments(
   const fallbackExt = convertToPdf ? ".xlsx" : ".pdf";
   let filtered = (listed.data ?? []).filter((item) => item.name.endsWith(preferredExt));
   if (filtered.length === 0) {
-    filtered = (listed.data ?? []).filter((item) =>
-      item.name.endsWith(fallbackExt),
-    );
+    filtered = (listed.data ?? []).filter((item) => item.name.endsWith(fallbackExt));
   }
 
   const attachments = [];
