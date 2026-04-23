@@ -64,7 +64,7 @@ export async function uploadCuentaCorrienteFiles(
     if (!convertPayload.ok) {
       toast.error(
         convertPayload.message ??
-          "PDF: el servidor no pudo generar el PDF (revisar que LibreOffice este en la imagen o el error devuelto).",
+          "PDF: no se genero ningun archivo. Revisar .xlsx en resultados o el error del servidor.",
         { duration: 12_000 },
       );
     } else {
@@ -77,7 +77,7 @@ export async function uploadCuentaCorrienteFiles(
           { duration: 10_000 },
         );
       } else if (convertPayload.converted > 0) {
-        toast.success(`PDF: ${convertPayload.converted} archivo(s) generado(s) con LibreOffice.`);
+        toast.success(`PDF: ${convertPayload.converted} archivo(s) generado(s).`);
       }
     }
   } catch (error) {

@@ -1,7 +1,7 @@
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
-import { convertXlsxToPdfWithLibreOffice } from "@/lib/libreoffice/convertXlsxToPdf";
+import { convertXlsxToPdf } from "@/lib/libreoffice/convertXlsxToPdf";
 import { createClient } from "@/lib/supabase/server";
 import { pathSafeVendorName } from "@/lib/vendors/pathSafeVendorName";
 
@@ -13,8 +13,8 @@ type Body = {
 };
 
 /**
- * Cuentas corrientes: XLSX (Supabase storage) → PDF con **LibreOffice** (headless),
- * sin APIs de terceros de pago. En producción, la imagen Docker ya incluye soffice.
+ * Cuentas corrientes: XLSX → PDF. LibreOffice si está disponible; si no, PDF de
+ * respaldo (tabla con pdf-lib) para que no quede en cero.
  */
 export async function POST(request: Request) {
   try {
@@ -100,7 +100,7 @@ export async function POST(request: Request) {
           }
 
           const sourceBytes = new Uint8Array(await downloaded.data.arrayBuffer());
-          const pdfBytes = await convertXlsxToPdfWithLibreOffice(sourceBytes, file.name);
+          const pdfBytes = await convertXlsxToPdf(sourceBytes, file.name);
 
           const pdfPath = filePath.replace(/\.xlsx$/i, ".pdf");
           const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {

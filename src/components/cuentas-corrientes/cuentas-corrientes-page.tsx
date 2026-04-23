@@ -448,14 +448,14 @@ export function CuentasCorrientesPage() {
                       <Button
                         size="icon"
                         variant="ghost"
-                        title="Generar PDF (LibreOffice en servidor)"
+                        title="Generar PDF (LO si hay; si no, tabla en PDF)"
                         onClick={async () => {
                           try {
                             const response = await triggerPdfConversion({
                               vendorName: vendor.normalizedName,
                             });
                             if (response.converted > 0) {
-                              toast.success(`PDF generado (${response.converted}) con LibreOffice.`);
+                              toast.success(`PDF generado (${response.converted} archivo(s)).`);
                             } else if (response.errors.length > 0) {
                               toast.error(
                                 `Fallo: ${response.errors[0]?.vendor} — ${response.errors[0]?.reason ?? "Error"}`,
@@ -464,7 +464,7 @@ export function CuentasCorrientesPage() {
                               toast.error(response.message);
                             } else {
                               toast.error(
-                                "No se encontraron .xlsx para convertir, o LibreOffice no esta disponible en el servidor.",
+                                "No se encontraron .xlsx en resultados, o el servidor no pudo leer/convertir.",
                               );
                             }
                           } catch (error) {
