@@ -9,7 +9,7 @@ import JSZip from "jszip";
 const PAGE_SETUP_ATTRS =
   'paperSize="8" orientation="landscape" fitToWidth="1" fitToHeight="0" usePrinterDefaults="0"';
 
-/** Decora los sheet*.xml para que Calc/LO ajuste ancho al imprimir. */
+/** Decora los sheet*.xml y workbook.xml para que Calc/LO ajuste ancho al imprimir. */
 export async function patchXlsxForPdfFit(xlsx: Uint8Array): Promise<Buffer> {
   const zip = await JSZip.loadAsync(Buffer.from(xlsx));
   const sheetPaths = Object.keys(zip.files).filter(
@@ -24,16 +24,28 @@ export async function patchXlsxForPdfFit(xlsx: Uint8Array): Promise<Buffer> {
     if (!file) continue;
     let xml = await file.async("string");
 
-    // 1) <sheetPr ...><pageSetUpPr fitToPage="1"/></sheetPr> (fuerza “ajustar”)
+    // 1) Quitar saltos de columna manuales (eso es lo que rompía el ancho).
+    xml = stripColBreaks(xml);
+    // 2) Quitar fila de saltos de alto (ok dejar LO decidir; evita páginas extra).
+    xml = stripRowBreaks(xml);
+    // 3) Forzar fitToPage=1 en <sheetPr><pageSetUpPr/>
     xml = ensureSheetPrFitToPage(xml);
-
-    // 2) <pageSetup .../> con los atributos que nos interesan
+    // 4) Reemplazar <pageSetup .../> por uno que ajuste ancho (sin scale).
     xml = ensurePageSetup(xml);
-
-    // 3) <pageMargins .../> mínimos (mejora el aprovechamiento del ancho)
+    // 5) Márgenes angostos para aprovechar ancho.
     xml = ensureTightPageMargins(xml);
 
     zip.file(path, xml);
+  }
+
+  // workbook.xml: eliminar `_xlnm.Print_Area` (LO lo respeta y puede cortar columnas).
+  const wbFile = zip.file("xl/workbook.xml");
+  if (wbFile) {
+    const xml = await wbFile.async("string");
+    const cleaned = stripPrintAreaDefinedNames(xml);
+    if (cleaned !== xml) {
+      zip.file("xl/workbook.xml", cleaned);
+    }
   }
 
   const out = await zip.generateAsync({
@@ -42,6 +54,38 @@ export async function patchXlsxForPdfFit(xlsx: Uint8Array): Promise<Buffer> {
     compressionOptions: { level: 6 },
   });
   return Buffer.from(out);
+}
+
+function stripColBreaks(xml: string): string {
+  return xml
+    .replace(/<colBreaks\b[\s\S]*?<\/colBreaks>/g, "")
+    .replace(/<colBreaks\b[^/>]*\/>/g, "");
+}
+
+function stripRowBreaks(xml: string): string {
+  return xml
+    .replace(/<rowBreaks\b[\s\S]*?<\/rowBreaks>/g, "")
+    .replace(/<rowBreaks\b[^/>]*\/>/g, "");
+}
+
+function stripPrintAreaDefinedNames(workbookXml: string): string {
+  if (!/<definedNames\b/.test(workbookXml)) {
+    return workbookXml;
+  }
+  return workbookXml.replace(
+    /<definedNames\b[^>]*>([\s\S]*?)<\/definedNames>/,
+    (_m, inner: string) => {
+      const cleaned = inner.replace(
+        /<definedName\b[^>]*name=("|')_xlnm\.Print_Area\1[\s\S]*?<\/definedName>/g,
+        "",
+      );
+      const trimmed = cleaned.trim();
+      if (trimmed.length === 0) {
+        return "";
+      }
+      return `<definedNames>${cleaned}</definedNames>`;
+    },
+  );
 }
 
 function ensureSheetPrFitToPage(xml: string): string {
