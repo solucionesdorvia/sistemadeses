@@ -5,9 +5,9 @@ const A4_H = 841.89;
 const MARGIN = 0.98;
 
 /**
- * Toma el PDF que sale de LibreOffice (A2, apaisado, distintos márgenes) y lo
- * recompone a **A4 vertical** encajando y escalando el contenido de cada página.
- * Así el resultado no depende de que Calc respete el `pageSetup` del xlsx.
+ * Toma el PDF de LibreOffice y lo recompone a A4 vertical.
+ * Recorta la porción **izquierda** de la hoja (donde está la grilla) para no
+ * escalar el blanco a la derecha, que hacía letra chica e “hoja vacía” al costado.
  */
 export async function refitPdfToA4Portrait(pdfBytes: Buffer): Promise<Buffer> {
   try {
@@ -20,7 +20,19 @@ export async function refitPdfToA4Portrait(pdfBytes: Buffer): Promise<Buffer> {
     const out = await PDFDocument.create();
 
     for (let i = 0; i < n; i += 1) {
-      const [embedded] = await out.embedPdf(pdfBytes, [i]);
+      const srcPage = source.getPage(i);
+      const w = srcPage.getWidth();
+      const h = srcPage.getHeight();
+      // Hojas anchas (A2/landscape o LO con mucho aire a la derecha): quedarnos con ~70% ancho; A4 raso: suavizar
+      const widePage = w > 620;
+      const clipRatio = widePage ? 0.7 : 0.9;
+      const clipW = w * clipRatio;
+      const embedded = await out.embedPage(srcPage, {
+        left: 0,
+        right: clipW,
+        bottom: 0,
+        top: h,
+      });
       const ew = embedded.width;
       const eh = embedded.height;
       const page = out.addPage([A4_W, A4_H]);
