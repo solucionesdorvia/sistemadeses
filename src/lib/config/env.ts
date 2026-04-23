@@ -12,7 +12,6 @@ const serverEnvSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
-  CONVERTAPI_SECRET: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
 });
 
@@ -41,7 +40,6 @@ export function getServerEnv() {
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
     GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
-    CONVERTAPI_SECRET: process.env.CONVERTAPI_SECRET,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   });
 }

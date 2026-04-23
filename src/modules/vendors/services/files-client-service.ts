@@ -1,8 +1,11 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
+import { pathSafeVendorName } from "@/lib/vendors/pathSafeVendorName";
 import type { CompanyType } from "@/lib/types/domain";
 import JSZip from "jszip";
+import { toast } from "sonner";
+
 import { invokeEdgeFunction } from "@/modules/vendors/services/edge-client-service";
 
 export async function uploadCuentaCorrienteFiles(
@@ -59,15 +62,23 @@ export async function uploadCuentaCorrienteFiles(
 
     const convertPayload = await triggerPdfConversion({ companyType });
     if (!convertPayload.ok) {
-      console.warn(
-        "[convert-pdf] Microsoft Graph no genero PDF:",
-        convertPayload.message ?? "Error desconocido",
+      toast.error(
+        convertPayload.message ??
+          "PDF: el servidor no pudo generar el PDF (revisar que LibreOffice este en la imagen o el error devuelto).",
+        { duration: 12_000 },
       );
-    } else if (convertPayload.errors.length > 0) {
-      console.warn(
-        "[convert-pdf] Errores parciales:",
-        convertPayload.errors.map((i) => `${i.vendor}: ${i.reason}`).join(" | "),
-      );
+    } else {
+      if (convertPayload.message) {
+        toast.info(convertPayload.message, { duration: 8_000 });
+      }
+      if (convertPayload.errors.length > 0) {
+        toast.error(
+          `PDF: ${convertPayload.errors[0]?.vendor} — ${convertPayload.errors[0]?.reason ?? "error"}`,
+          { duration: 10_000 },
+        );
+      } else if (convertPayload.converted > 0) {
+        toast.success(`PDF: ${convertPayload.converted} archivo(s) generado(s) con LibreOffice.`);
+      }
     }
   } catch (error) {
     if (uploadedPaths.length > 0) {
@@ -125,6 +136,7 @@ type ConvertPdfResponse = {
   ok: boolean;
   converted: number;
   errors: Array<{ vendor: string; file: string; reason: string }>;
+  /** Aviso informativo (p. ej. cero archivos o sin vendedores) */
   message?: string;
 };
 
@@ -195,8 +207,8 @@ export async function listVendorResultFiles(vendorName: string) {
   } = await supabase.auth.getUser();
   if (!user) throw new Error("Sesion invalida.");
 
-  const folder = vendorName.toLowerCase().replace(/\s+/g, "-");
-  const path = `${user.id}/vendedores/${folder}`;
+  // Debe ser `vendors.normalized_name` (misma lógica que al subir a results).
+  const path = `${user.id}/vendedores/${pathSafeVendorName(vendorName)}`;
   const listed = await supabase.storage.from("results").list(path, { limit: 1000 });
   if (listed.error) throw new Error(listed.error.message);
 

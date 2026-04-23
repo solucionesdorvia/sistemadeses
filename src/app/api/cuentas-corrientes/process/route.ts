@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { pathSafeVendorName } from "@/lib/vendors/pathSafeVendorName";
 
 export const runtime = "nodejs";
 
@@ -472,16 +473,6 @@ function titleCase(value: string): string {
     })
     .join(" ")
     .trim();
-}
-
-function pathSafeVendorName(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z0-9 -]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "-");
 }
 
 function normalizeCompareText(value: string) {

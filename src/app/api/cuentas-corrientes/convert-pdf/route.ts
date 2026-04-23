@@ -1,9 +1,9 @@
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
-import { getMicrosoftGraphPdfConfig } from "@/lib/microsoft-graph/config";
-import { convertXlsxToPdfWithGraph } from "@/lib/microsoft-graph/convertXlsxToPdfWithGraph";
+import { convertXlsxToPdfWithLibreOffice } from "@/lib/libreoffice/convertXlsxToPdf";
 import { createClient } from "@/lib/supabase/server";
+import { pathSafeVendorName } from "@/lib/vendors/pathSafeVendorName";
 
 export const runtime = "nodejs";
 
@@ -13,23 +13,11 @@ type Body = {
 };
 
 /**
- * Cuentas corrientes: XLSX (storage) -> PDF vía **Microsoft Graph**
- * (Excel Online renderiza: máxima fidelidad frente a LibreOffice en servidor).
- * Requiere variables de entorno Microsoft 365; ver `getMicrosoftGraphPdfConfig`.
+ * Cuentas corrientes: XLSX (Supabase storage) → PDF con **LibreOffice** (headless),
+ * sin APIs de terceros de pago. En producción, la imagen Docker ya incluye soffice.
  */
 export async function POST(request: Request) {
   try {
-    const graphConfig = getMicrosoftGraphPdfConfig();
-    if (!graphConfig) {
-      return Response.json({
-        ok: false,
-        converted: 0,
-        errors: [],
-        message:
-          "Microsoft Graph no configurado. Definir MICROSOFT_TENANT_ID, MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET, MICROSOFT_GRAPH_USER_ID (y opcionalmente MICROSOFT_PDF_TEMP_FOLDER).",
-      });
-    }
-
     const authClient = await createClient();
     const {
       data: { user },
@@ -70,13 +58,18 @@ export async function POST(request: Request) {
     const companySuffix = body.companyType ? `_${body.companyType}.xlsx` : ".xlsx";
 
     const normalizedTarget = body.vendorName?.trim().toLowerCase() ?? null;
+    // Tras subir por empresa, siempre se pasa `companyType`: convertir para todos
+    // los vendedores con XLSX de ese lote, sin exigir `convert_to_pdf` (el flag
+    // sigue valiendo para email/Drive y llamadas sin companyType ni vendorName).
+    const scopeFromUpload = Boolean(body.companyType || body.vendorName);
     const selectedVendors = (vendorsResult.data ?? []).filter((vendor) => {
       const matchesByName = normalizedTarget
         ? vendor.normalized_name.toLowerCase() === normalizedTarget ||
           (vendor.canonical_name ?? "").toLowerCase() === normalizedTarget
         : true;
       if (!matchesByName) return false;
-      return normalizedTarget ? true : Boolean(vendor.convert_to_pdf);
+      if (scopeFromUpload) return true;
+      return Boolean(vendor.convert_to_pdf);
     });
 
     for (const vendor of selectedVendors) {
@@ -107,14 +100,7 @@ export async function POST(request: Request) {
           }
 
           const sourceBytes = new Uint8Array(await downloaded.data.arrayBuffer());
-          let pdfBytes: Buffer;
-          try {
-            pdfBytes = await convertXlsxToPdfWithGraph(sourceBytes, file.name, graphConfig);
-          } catch (err) {
-            throw new Error(
-              err instanceof Error ? err.message : "Error al convertir con Microsoft Graph.",
-            );
-          }
+          const pdfBytes = await convertXlsxToPdfWithLibreOffice(sourceBytes, file.name);
 
           const pdfPath = filePath.replace(/\.xlsx$/i, ".pdf");
           const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {
@@ -135,10 +121,19 @@ export async function POST(request: Request) {
       }
     }
 
+    let message: string | undefined;
+    if (selectedVendors.length === 0) {
+      message =
+        "No hay vendedores para convertir. Con ambito restringido, revisa el nombre; sin companyType/vendorName hace falta 'PDF' activo en vendedor.";
+    } else if (converted === 0 && errors.length === 0) {
+      message = "Ningun archivo .xlsx coincidente en resultados (carpeta de vendedor / sufijo de empresa).";
+    }
+
     return Response.json({
       ok: true,
       converted,
       errors,
+      ...(message ? { message } : {}),
     });
   } catch (error) {
     return Response.json(
@@ -146,14 +141,4 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
-}
-
-function pathSafeVendorName(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z0-9 -]/g, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "-");
 }

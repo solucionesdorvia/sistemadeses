@@ -381,7 +381,7 @@ export function CuentasCorrientesPage() {
                         onClick={async () => {
                           try {
                             const files = await listVendorResultFiles(
-                              vendor.canonicalName ?? vendor.normalizedName,
+                              vendor.normalizedName,
                             );
                             await downloadVendorZip(
                               files.map((file) => file.path),
@@ -448,14 +448,14 @@ export function CuentasCorrientesPage() {
                       <Button
                         size="icon"
                         variant="ghost"
-                        title="Generar PDF (Microsoft 365 / Graph)"
+                        title="Generar PDF (LibreOffice en servidor)"
                         onClick={async () => {
                           try {
                             const response = await triggerPdfConversion({
                               vendorName: vendor.normalizedName,
                             });
                             if (response.converted > 0) {
-                              toast.success(`PDF generado (${response.converted}) con Microsoft 365.`);
+                              toast.success(`PDF generado (${response.converted}) con LibreOffice.`);
                             } else if (response.errors.length > 0) {
                               toast.error(
                                 `Fallo: ${response.errors[0]?.vendor} — ${response.errors[0]?.reason ?? "Error"}`,
@@ -463,7 +463,9 @@ export function CuentasCorrientesPage() {
                             } else if (!response.ok && response.message) {
                               toast.error(response.message);
                             } else {
-                              toast.error("No se encontraron XLSX para convertir o Graph no esta configurado.");
+                              toast.error(
+                                "No se encontraron .xlsx para convertir, o LibreOffice no esta disponible en el servidor.",
+                              );
                             }
                           } catch (error) {
                             toast.error(
@@ -477,9 +479,7 @@ export function CuentasCorrientesPage() {
                     </div>
                   </CollapsibleTrigger>
                   <CollapsibleContent className="border-t p-3">
-                    <VendorFilesList
-                      vendorName={vendor.canonicalName ?? vendor.normalizedName}
-                    />
+                    <VendorFilesList vendorName={vendor.normalizedName} />
                   </CollapsibleContent>
                 </Collapsible>
               ))
@@ -515,7 +515,7 @@ export function CuentasCorrientesPage() {
                       <TableHead>Vendedor</TableHead>
                       <TableHead>Email</TableHead>
                       <TableHead>Carpeta Drive</TableHead>
-                      <TableHead>PDF (M365)</TableHead>
+                      <TableHead>PDF</TableHead>
                       <TableHead>Acciones</TableHead>
                     </TableRow>
                   </TableHeader>
