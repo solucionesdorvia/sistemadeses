@@ -6,9 +6,28 @@ const MARGIN = 0.98;
 
 /**
  * Toma el PDF de LibreOffice y lo recompone a A4 vertical.
- * Recorta la porción **izquierda** de la hoja (donde está la grilla) para no
- * escalar el blanco a la derecha, que hacía letra chica e “hoja vacía” al costado.
+ * Solo recortamos ancho a la derecha en **hojas muy anchas** (A2, apaisada con
+ * franja blanca). En A4 ya “normal” (ancho ~595 pt) **no** recortamos: si no,
+ * se manda mal la hoja (se cortan importes o columnas a la derecha).
  */
+function clipWidthRatio(w: number, h: number): number {
+  const portrait = h >= w * 0.99;
+  const a4LikeW = w >= 560 && w <= 630;
+  if (portrait && a4LikeW) {
+    return 1;
+  }
+  if (w > 1100) {
+    return 0.7;
+  }
+  if (w > 800) {
+    return 0.78;
+  }
+  if (w > 700) {
+    return 0.9;
+  }
+  return 1;
+}
+
 export async function refitPdfToA4Portrait(pdfBytes: Buffer): Promise<Buffer> {
   try {
     const source = await PDFDocument.load(Uint8Array.from(pdfBytes), {
@@ -23,16 +42,17 @@ export async function refitPdfToA4Portrait(pdfBytes: Buffer): Promise<Buffer> {
       const srcPage = source.getPage(i);
       const w = srcPage.getWidth();
       const h = srcPage.getHeight();
-      // Hojas anchas (A2/landscape o LO con mucho aire a la derecha): quedarnos con ~70% ancho; A4 raso: suavizar
-      const widePage = w > 620;
-      const clipRatio = widePage ? 0.7 : 0.9;
-      const clipW = w * clipRatio;
-      const embedded = await out.embedPage(srcPage, {
-        left: 0,
-        right: clipW,
-        bottom: 0,
-        top: h,
-      });
+      const ratio = clipWidthRatio(w, h);
+      const clipW = w * ratio;
+      const embedded =
+        ratio >= 0.999
+          ? await out.embedPage(srcPage)
+          : await out.embedPage(srcPage, {
+              left: 0,
+              right: clipW,
+              bottom: 0,
+              top: h,
+            });
       const ew = embedded.width;
       const eh = embedded.height;
       const page = out.addPage([A4_W, A4_H]);

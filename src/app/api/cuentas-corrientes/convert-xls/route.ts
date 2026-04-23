@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { getLibreOfficeCommand } from "@/lib/libreoffice/command";
 import * as XLSX from "xlsx";
 
 const execFileAsync = promisify(execFile);
@@ -45,15 +46,6 @@ export async function POST(request: Request) {
   }
 }
 
-async function hasSoffice() {
-  try {
-    await execFileAsync("which", ["soffice"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * LibreOffice preserva formato, anchos y estilos al pasar .xls → .xlsx (mejor para PDF posterior).
  * Si falla (p. ej. sin JRE), se usa SheetJS en el caller.
@@ -62,7 +54,8 @@ async function convertWithLibreOffice(
   sourceBytes: Uint8Array,
   sourceName: string,
 ): Promise<Buffer | null> {
-  if (!(await hasSoffice())) return null;
+  const loCommand = await getLibreOfficeCommand();
+  if (!loCommand) return null;
 
   const tempRoot = await mkdtemp(join(tmpdir(), "convert-xls-lo-"));
   const sourcePath = join(tempRoot, sourceName);
@@ -75,7 +68,7 @@ async function convertWithLibreOffice(
     await writeFile(sourcePath, sourceBytes);
 
     await execFileAsync(
-      "soffice",
+      loCommand,
       [
         "--headless",
         "--norestore",

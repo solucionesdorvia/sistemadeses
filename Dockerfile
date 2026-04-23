@@ -22,6 +22,8 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
+# LibreOffice en servidor sin X11 (Railway / Docker)
+ENV SAL_USE_VCLPLUGIN=headless
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
@@ -29,7 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libreoffice-java-common \
   libreoffice \
   fonts-dejavu-core \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && (soffice --version || libreoffice --version)
 
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules

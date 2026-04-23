@@ -10,6 +10,7 @@ import JSZip from "jszip";
 import * as XLSX from "xlsx";
 
 import { getClientEnv, getServerEnv } from "@/lib/config/env";
+import { getLibreOfficeCommand } from "@/lib/libreoffice/command";
 import { refitPdfToA4Portrait } from "@/lib/pdf/refitToA4Portrait";
 import { createClient } from "@/lib/supabase/server";
 
@@ -24,13 +25,14 @@ type Body = {
 
 export async function POST(request: Request) {
   try {
-    const sofficeAvailable = await hasSoffice();
-    if (!sofficeAvailable) {
+    const loCommand = await getLibreOfficeCommand();
+    if (!loCommand) {
       return Response.json({
         ok: false,
         converted: 0,
         errors: [],
-        message: "LibreOffice (soffice) no disponible en runtime.",
+        message:
+          "LibreOffice no disponible o no ejecutable (comprobar soffice/libreoffice y --version).",
       });
     }
 
@@ -121,7 +123,7 @@ export async function POST(request: Request) {
           try {
             const xlsxForPdf = await prepareCuentaCorrienteXlsxForPdf(sourceBytes);
             await writeFile(localXlsx, xlsxForPdf);
-            await runLibreOfficePdfConversion(localXlsx, tempRoot);
+            await runLibreOfficePdfConversion(loCommand, localXlsx, tempRoot);
             let pdfBytes: Buffer;
             try {
               const rawLoPdf = await readFile(localPdf);
@@ -185,20 +187,15 @@ function pathSafeVendorName(value: string) {
     .replace(/\s+/g, "-");
 }
 
-async function hasSoffice() {
-  try {
-    await execFileAsync("which", ["soffice"]);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function runLibreOfficePdfConversion(localXlsx: string, tempRoot: string) {
+async function runLibreOfficePdfConversion(
+  loCommand: string,
+  localXlsx: string,
+  tempRoot: string,
+) {
   const profileDir = join(tempRoot, "lo-profile");
   const userInstallation = pathToFileURL(profileDir).href;
   await execFileAsync(
-    "soffice",
+    loCommand,
     [
       "--headless",
       "--norestore",
