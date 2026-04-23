@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { getLibreOfficeCommand } from "@/lib/libreoffice/command";
+import { patchXlsxForPdfFit } from "@/lib/libreoffice/patchXlsxForPdfFit";
 import {
   minimalPdfError,
   xlsxToPdfFallback,
@@ -74,7 +75,14 @@ export async function convertXlsxToPdfWithLibreOffice(
   };
 
   try {
-    await writeFile(inPath, Buffer.from(xlsx));
+    // Editamos el XLSX (no fork): fuerza apaisado A3 + fitToWidth=1 en cada hoja.
+    let input: Buffer;
+    try {
+      input = await patchXlsxForPdfFit(xlsx);
+    } catch {
+      input = Buffer.from(xlsx);
+    }
+    await writeFile(inPath, input);
 
     for (const filter of ["pdf:calc_pdf_Export", "pdf"] as const) {
       try {
