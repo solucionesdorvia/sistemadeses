@@ -189,18 +189,37 @@ export async function xlsxToPdfFallback(
   }
 
   if (loErrorNote) {
-    const n = pdf.getPageCount();
-    if (n > 0) {
-      const p = pdf.getPage(n - 1);
-      p.drawText(`PDF de respaldo (tabla de datos). LO: ${truncateCell(loErrorNote, 150)}`, {
+    // Pagina extra dedicada al error completo: sin truncar con `…`, asi se
+    // puede leer textual el motivo por el que LO rechaza el XLSX puntual.
+    const errPage = pdf.addPage([PAGE_W, PAGE_H]);
+    errPage.drawText("PDF de respaldo (tabla de datos): LibreOffice fallo.", {
+      x: MARGIN,
+      y: PAGE_H - MARGIN - 14,
+      size: 12,
+      font: fontBold,
+      color: rgb(0.45, 0, 0),
+    });
+    errPage.drawText(
+      "El contenido se renderizo con pdf-lib (truncado). Mensaje completo de LibreOffice abajo:",
+      {
         x: MARGIN,
-        y: MARGIN + 6,
-        size: 5,
+        y: PAGE_H - MARGIN - 32,
+        size: 9,
         font,
-        color: rgb(0.4, 0.4, 0.4),
+        color: rgb(0.2, 0.2, 0.2),
         maxWidth: PAGE_W - 2 * MARGIN,
-      });
-    }
+      },
+    );
+    const cleanedNote = loErrorNote.replace(/\s+/g, " ").trim();
+    errPage.drawText(cleanedNote, {
+      x: MARGIN,
+      y: PAGE_H - MARGIN - 56,
+      size: 8,
+      font,
+      color: rgb(0.1, 0.1, 0.1),
+      maxWidth: PAGE_W - 2 * MARGIN,
+      lineHeight: 11,
+    });
   }
 
   return Buffer.from(await pdf.save({ useObjectStreams: false }));

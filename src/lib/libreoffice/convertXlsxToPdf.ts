@@ -104,12 +104,18 @@ export async function convertXlsxToPdfWithLibreOffice(
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        // Loguear COMPLETO en consola (Railway logs) — sin truncar — para
+        // diagnosticar por qué LibreOffice rechaza un XLSX puntual.
+        console.error(
+          `[convertXlsxToPdfWithLibreOffice] pasada filter=${pass.filter} input=${pass.input === patched ? "patched" : "original"} bytes=${pass.input.byteLength} fallo:`,
+          msg,
+        );
         if (/cannot fork|ENOMEM|out of memory/i.test(msg)) {
           throw new Error(
             `LibreOffice: recurso agotado en el servidor (Cannot fork / memoria). Usar un plan con mas RAM o el PDF de respaldo se aplicara. ${msg}`,
           );
         }
-        lastErrorMessage = msg;
+        lastErrorMessage = `filter=${pass.filter} input=${pass.input === patched ? "patched" : "original"}: ${msg}`;
         // No tirar: seguir a la pasada siguiente (XLSX original sin parchar).
         continue;
       }
