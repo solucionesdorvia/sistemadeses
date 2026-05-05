@@ -74,19 +74,29 @@ export async function convertXlsxToPdfWithLibreOffice(
     return join(outDir, exact ?? names[0]!);
   };
 
+  // Dos pasadas: (1) XLSX parchado (apaisado A3 + fitToWidth=1) con filtro
+  // `pdf:calc_pdf_Export`. (2) XLSX original sin parchar con filtro `pdf` —
+  // red de seguridad para los XLSX en los que el parche genera XML que LO
+  // rechaza (caso Days observado: caia al fallback de pdf-lib que trunca).
+  let patched: Buffer;
   try {
-    // Editamos el XLSX (no fork): fuerza apaisado A3 + fitToWidth=1 en cada hoja.
-    let input: Buffer;
-    try {
-      input = await patchXlsxForPdfFit(xlsx);
-    } catch {
-      input = Buffer.from(xlsx);
-    }
-    await writeFile(inPath, input);
+    patched = await patchXlsxForPdfFit(xlsx);
+  } catch {
+    patched = Buffer.from(xlsx);
+  }
+  const original = Buffer.from(xlsx);
 
-    for (const filter of ["pdf:calc_pdf_Export", "pdf"] as const) {
+  const passes: Array<{ input: Buffer; filter: "pdf:calc_pdf_Export" | "pdf" }> = [
+    { input: patched, filter: "pdf:calc_pdf_Export" },
+    { input: original, filter: "pdf" },
+  ];
+
+  let lastErrorMessage = "";
+  try {
+    for (const pass of passes) {
+      await writeFile(inPath, pass.input);
       try {
-        await execFileAsync(loCommand, argsFor(filter), {
+        await execFileAsync(loCommand, argsFor(pass.filter), {
           env: loEnv,
           cwd: outDir,
           timeout: 120_000,
@@ -99,7 +109,9 @@ export async function convertXlsxToPdfWithLibreOffice(
             `LibreOffice: recurso agotado en el servidor (Cannot fork / memoria). Usar un plan con mas RAM o el PDF de respaldo se aplicara. ${msg}`,
           );
         }
-        throw e;
+        lastErrorMessage = msg;
+        // No tirar: seguir a la pasada siguiente (XLSX original sin parchar).
+        continue;
       }
 
       const p = await findPdf();
@@ -118,8 +130,9 @@ export async function convertXlsxToPdfWithLibreOffice(
     } catch {
       list = "";
     }
+    const tail = lastErrorMessage ? ` ultimo_error=${lastErrorMessage}` : "";
     throw new Error(
-      `LibreOffice no genero ${LO_STEM}.pdf en [${list || "directorio vacio"}].`,
+      `LibreOffice no genero ${LO_STEM}.pdf en [${list || "directorio vacio"}].${tail}`,
     );
   } catch (e) {
     if (e instanceof Error && e.message.startsWith("LibreOffice ")) {
