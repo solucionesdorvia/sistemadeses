@@ -55,6 +55,7 @@ export async function convertXlsxToPdfWithLibreOffice(
     "--norestore",
     "--nologo",
     "--nofirststartwizard",
+    "--nojava",
     `-env:UserInstallation=${userInstallation}`,
     "--convert-to",
     filter,
