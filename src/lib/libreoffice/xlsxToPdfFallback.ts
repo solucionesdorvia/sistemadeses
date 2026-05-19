@@ -169,13 +169,9 @@ export async function xlsxToPdfFallback(
     const rowAreaH = CH - 2 * MARGIN - TITLE_BLOCK;
     const rowsPerPage = Math.max(1, Math.floor(rowAreaH / ROW_H));
 
-    // Paleta visual
-    const HDR_FILL = rgb(0.16, 0.29, 0.52);
-    const HDR_TEXT = rgb(1, 1, 1);
-    const ALT_FILL = rgb(0.94, 0.96, 0.99);
     const WHITE = rgb(1, 1, 1);
     const CELL_BORDER = rgb(0.72, 0.72, 0.72);
-    const TEXT_COL = rgb(0.08, 0.08, 0.08);
+    const TEXT_COL = rgb(0, 0, 0);
 
     let offset = 0;
     let part = 0;
@@ -206,7 +202,6 @@ export async function xlsxToPdfFallback(
         const textY = rowBottom + ROW_H * 0.3;
 
         const isHeaderRow = ri === range.s.r;
-        const isEven = (ri - range.s.r) % 2 === 0;
 
         let x = MARGIN;
         for (let c = 0; c < colCount; c += 1) {
@@ -215,13 +210,13 @@ export async function xlsxToPdfFallback(
           const cap = Math.max(14, Math.floor(cw / (size * 0.52)));
           const t = truncateCell(raw, cap);
 
-          // Fondo de celda + borde
+          // Celda: fondo blanco + borde gris
           page.drawRectangle({
             x,
             y: rowBottom,
             width: cw,
             height: ROW_H,
-            color: isHeaderRow ? HDR_FILL : isEven ? ALT_FILL : WHITE,
+            color: WHITE,
             borderColor: CELL_BORDER,
             borderWidth: 0.35,
           });
@@ -246,7 +241,7 @@ export async function xlsxToPdfFallback(
             y: textY,
             size,
             font: isHeaderRow ? fontBold : font,
-            color: isHeaderRow ? HDR_TEXT : TEXT_COL,
+            color: TEXT_COL,
             maxWidth: cw - 5,
           });
 
