@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -42,14 +42,38 @@ export async function convertXlsxToPdfWithLibreOffice(
   const profileDir = join(tempRoot, "lo-profile");
   const userInstallation = pathToFileURL(profileDir).href;
 
+  // Pre-crear el perfil de LibreOffice con Java desactivado en su propio
+  // registro de configuración. Esto evita que LO inicialice la JVM incluso
+  // cuando Java está instalado en el sistema — más fiable que --nojava solo,
+  // que sólo aplica después de que el perfil ya fue cargado.
+  const loUserDir = join(profileDir, "user");
+  await mkdir(loUserDir, { recursive: true });
+  await writeFile(
+    join(loUserDir, "registrymodifications.xcu"),
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<oor:items xmlns:oor="http://openoffice.org/2001/registry"',
+      '           xmlns:xs="http://www.w3.org/2001/XMLSchema"',
+      '           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">',
+      '  <item oor:path="/org.openoffice.Office.Java/Java">',
+      '    <prop oor:name="Enable" oor:op="fuse"><value>false</value></prop>',
+      "  </item>",
+      "</oor:items>",
+    ].join("\n"),
+    "utf-8",
+  );
+
   const loEnv = {
     ...process.env,
     HOME: tempRoot,
     SAL_USE_VCLPLUGIN: "headless",
     LANG: process.env.LANG ?? "C.UTF-8",
     OOGM_NO_NFS_CHECK: "1",
-    JAVA_HOME: "",
+    // Apuntar JAVA_HOME a una ruta inexistente impide que LibreOffice
+    // encuentre una JVM aunque esté instalada en el sistema.
+    JAVA_HOME: "/dev/null/no-java",
     JDK_JAVA_OPTIONS: "",
+    _JAVA_OPTIONS: "",
   };
 
   const argsFor = (filter: string) => [
