@@ -48,6 +48,8 @@ export async function convertXlsxToPdfWithLibreOffice(
     SAL_USE_VCLPLUGIN: "headless",
     LANG: process.env.LANG ?? "C.UTF-8",
     OOGM_NO_NFS_CHECK: "1",
+    JAVA_HOME: "",
+    JDK_JAVA_OPTIONS: "",
   };
 
   const argsFor = (filter: string) => [

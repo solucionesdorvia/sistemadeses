@@ -27,8 +27,6 @@ ENV SAL_USE_VCLPLUGIN=headless
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
-  default-jre-headless \
-  libreoffice-java-common \
   libreoffice \
   fonts-dejavu-core \
   && rm -rf /var/lib/apt/lists/* \
