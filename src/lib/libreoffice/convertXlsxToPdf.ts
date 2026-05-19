@@ -69,8 +69,11 @@ export async function convertXlsxToPdfWithLibreOffice(
     SAL_USE_VCLPLUGIN: "headless",
     LANG: process.env.LANG ?? "C.UTF-8",
     OOGM_NO_NFS_CHECK: "1",
-    // Apuntar JAVA_HOME a una ruta inexistente impide que LibreOffice
-    // encuentre una JVM aunque esté instalada en el sistema.
+    // SAL_NO_JAVA=1 es la variable de entorno interna de LibreOffice para
+    // deshabilitar Java ANTES de que el runtime cargue la JVM — más
+    // efectivo que --nojava, que solo aplica después de parsear el perfil.
+    SAL_NO_JAVA: "1",
+    // JAVA_HOME a ruta inexistente impide que LibreOffice localice la JVM.
     JAVA_HOME: "/dev/null/no-java",
     JDK_JAVA_OPTIONS: "",
     _JAVA_OPTIONS: "",

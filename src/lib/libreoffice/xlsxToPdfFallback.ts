@@ -137,9 +137,28 @@ export async function xlsxToPdfFallback(
 
     const title = `Cuenta corriente — ${sheetName} — ${label}`;
     const contentW = PAGE_W - 2 * MARGIN;
-    const colW = contentW / Math.max(1, colCount);
-    const size = Math.max(4.5, Math.min(8.5, colW / 2.8));
-    const lineH = size * 1.3;
+
+    // Ancho de columna proporcional al contenido real (max de cada columna).
+    // Mínimo 24pt, así columnas con números cortos no roban espacio a las
+    // columnas con nombres largos. Cap por columna: 40 % del ancho total.
+    const maxLens = Array(colCount).fill(0) as number[];
+    for (const row of rows) {
+      for (let c = 0; c < colCount; c++) {
+        maxLens[c] = Math.max(maxLens[c]!, (row[c] ?? "").length);
+      }
+    }
+    const totalLen = maxLens.reduce((a, b) => a + Math.max(b, 3), 0) || 1;
+    const rawColWidths = maxLens.map((len) =>
+      Math.min((Math.max(len, 3) / totalLen) * contentW, contentW * 0.4),
+    );
+    // Normalizar para que sumen exactamente contentW.
+    const rawSum = rawColWidths.reduce((a, b) => a + b, 0) || 1;
+    const colWidths = rawColWidths.map((w) => (w / rawSum) * contentW);
+
+    // Tamaño de fuente adaptado al ancho promedio de columna.
+    const avgColW = contentW / Math.max(1, colCount);
+    const size = Math.max(4.5, Math.min(8, avgColW / 3.2));
+    const lineH = size * 1.45;
     const titleBlock = 32;
     const rowAreaH = PAGE_H - 2 * MARGIN - titleBlock;
     const rowsPerPage = Math.max(1, Math.floor(rowAreaH / lineH));
@@ -169,18 +188,19 @@ export async function xlsxToPdfFallback(
         const row = rows[ri]!;
         let x = MARGIN;
         for (let c = 0; c < colCount; c += 1) {
-          const raw = String(row[c] ?? "");
-          const cap = colW < 30 ? 12 : 28;
-          const t = truncateCell(raw, cap);
+          const cw = colWidths[c] ?? avgColW;
+          // Cap de caracteres generoso: ~4 px/char a fuente size.
+          const cap = Math.max(12, Math.floor(cw / (size * 0.52)));
+          const t = truncateCell(String(row[c] ?? ""), cap);
           page.drawText(t, {
             x,
             y,
             size,
             font,
             color: rgb(0, 0, 0),
-            maxWidth: colW - 1,
+            maxWidth: cw - 2,
           });
-          x += colW;
+          x += cw;
         }
         y -= lineH;
       }
@@ -200,7 +220,7 @@ export async function xlsxToPdfFallback(
       color: rgb(0.45, 0, 0),
     });
     errPage.drawText(
-      "El contenido se renderizo con pdf-lib (truncado). Mensaje completo de LibreOffice abajo:",
+      "El contenido se renderizo con pdf-lib. Mensaje completo de LibreOffice abajo:",
       {
         x: MARGIN,
         y: PAGE_H - MARGIN - 32,
