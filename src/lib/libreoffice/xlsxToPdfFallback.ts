@@ -27,9 +27,12 @@ export async function minimalPdfError(message: string): Promise<Buffer> {
   return Buffer.from(await pdf.save({ useObjectStreams: false }));
 }
 
-/** A4 apaisada (pt), origen abajo-izquierda en pdf-lib */
+/** A4 apaisada (pt) — para páginas de error y hojas angostas */
 const PAGE_W = 842.07;
 const PAGE_H = 595.28;
+/** A3 apaisada (pt) — para hojas con muchas columnas */
+const PAGE_W_A3 = 1190.55;
+const PAGE_H_A3 = 841.89;
 const MARGIN = 36;
 
 function truncateCell(s: string, max: number): string {
@@ -136,74 +139,121 @@ export async function xlsxToPdfFallback(
     }
 
     const title = `Cuenta corriente — ${sheetName} — ${label}`;
-    const contentW = PAGE_W - 2 * MARGIN;
 
-    // Ancho de columna proporcional al contenido real (max de cada columna).
-    // Mínimo 24pt, así columnas con números cortos no roban espacio a las
-    // columnas con nombres largos. Cap por columna: 40 % del ancho total.
+    // A3 apaisado para hojas con muchas columnas, A4 para pocas.
+    const isWide = colCount > 6;
+    const CW = isWide ? PAGE_W_A3 : PAGE_W;
+    const CH = isWide ? PAGE_H_A3 : PAGE_H;
+    const contentW = CW - 2 * MARGIN;
+
+    // Anchos de columna proporcionales al contenido real de cada columna.
+    // Cap por columna: 42 % del ancho total para evitar que una columna
+    // con texto muy largo consuma toda la página.
     const maxLens = Array(colCount).fill(0) as number[];
     for (const row of rows) {
       for (let c = 0; c < colCount; c++) {
         maxLens[c] = Math.max(maxLens[c]!, (row[c] ?? "").length);
       }
     }
-    const totalLen = maxLens.reduce((a, b) => a + Math.max(b, 3), 0) || 1;
-    const rawColWidths = maxLens.map((len) =>
-      Math.min((Math.max(len, 3) / totalLen) * contentW, contentW * 0.4),
+    const totalLenRaw = maxLens.reduce((a, b) => a + Math.max(b, 3), 0) || 1;
+    const rawWidths = maxLens.map((len) =>
+      Math.min((Math.max(len, 3) / totalLenRaw) * contentW, contentW * 0.42),
     );
-    // Normalizar para que sumen exactamente contentW.
-    const rawSum = rawColWidths.reduce((a, b) => a + b, 0) || 1;
-    const colWidths = rawColWidths.map((w) => (w / rawSum) * contentW);
+    const rawSum = rawWidths.reduce((a, b) => a + b, 0) || 1;
+    const colWidths = rawWidths.map((w) => (w / rawSum) * contentW);
 
-    // Tamaño de fuente adaptado al ancho promedio de columna.
     const avgColW = contentW / Math.max(1, colCount);
-    const size = Math.max(4.5, Math.min(8, avgColW / 3.2));
-    const lineH = size * 1.45;
-    const titleBlock = 32;
-    const rowAreaH = PAGE_H - 2 * MARGIN - titleBlock;
-    const rowsPerPage = Math.max(1, Math.floor(rowAreaH / lineH));
+    const size = Math.max(5, Math.min(8, avgColW / 2.8));
+    const ROW_H = size * 2.1;
+    const TITLE_BLOCK = 28;
+    const rowAreaH = CH - 2 * MARGIN - TITLE_BLOCK;
+    const rowsPerPage = Math.max(1, Math.floor(rowAreaH / ROW_H));
+
+    // Paleta visual
+    const HDR_FILL = rgb(0.16, 0.29, 0.52);
+    const HDR_TEXT = rgb(1, 1, 1);
+    const ALT_FILL = rgb(0.94, 0.96, 0.99);
+    const WHITE = rgb(1, 1, 1);
+    const CELL_BORDER = rgb(0.72, 0.72, 0.72);
+    const TEXT_COL = rgb(0.08, 0.08, 0.08);
 
     let offset = 0;
     let part = 0;
     const pageParts = Math.max(1, Math.ceil(rowCount / rowsPerPage));
     while (offset < rowCount) {
       part += 1;
-      const page = pdf.addPage([PAGE_W, PAGE_H]);
-      let y = PAGE_H - MARGIN - 10;
+      const page = pdf.addPage([CW, CH]);
       const head =
         rowCount > rowsPerPage
           ? `${title}  (parte ${part} de ${pageParts})`
           : title;
       page.drawText(truncateCell(head, 200), {
         x: MARGIN,
-        y,
+        y: CH - MARGIN - 10,
         size: 9,
         font: fontBold,
         color: rgb(0, 0, 0.35),
         maxWidth: contentW,
       });
-      y -= titleBlock;
+
+      const startY = CH - MARGIN - TITLE_BLOCK;
       const limit = Math.min(offset + rowsPerPage, rowCount);
+
       for (let ri = offset; ri < limit; ri += 1) {
-        const row = rows[ri]!;
+        const localIdx = ri - offset;
+        const rowBottom = startY - (localIdx + 1) * ROW_H;
+        // Baseline de texto a ~30 % de la altura de la fila desde abajo.
+        const textY = rowBottom + ROW_H * 0.3;
+
+        const isHeaderRow = ri === range.s.r;
+        const isEven = (ri - range.s.r) % 2 === 0;
+
         let x = MARGIN;
         for (let c = 0; c < colCount; c += 1) {
           const cw = colWidths[c] ?? avgColW;
-          // Cap de caracteres generoso: ~4 px/char a fuente size.
-          const cap = Math.max(12, Math.floor(cw / (size * 0.52)));
-          const t = truncateCell(String(row[c] ?? ""), cap);
-          page.drawText(t, {
+          const raw = String(rows[ri]![c] ?? "");
+          const cap = Math.max(14, Math.floor(cw / (size * 0.52)));
+          const t = truncateCell(raw, cap);
+
+          // Fondo de celda + borde
+          page.drawRectangle({
             x,
-            y,
-            size,
-            font,
-            color: rgb(0, 0, 0),
-            maxWidth: cw - 2,
+            y: rowBottom,
+            width: cw,
+            height: ROW_H,
+            color: isHeaderRow ? HDR_FILL : isEven ? ALT_FILL : WHITE,
+            borderColor: CELL_BORDER,
+            borderWidth: 0.35,
           });
+
+          // Alinear números a la derecha
+          const isNum =
+            !isHeaderRow &&
+            raw.trim() !== "" &&
+            /^-?[\d.,\s]+$/.test(raw.trim());
+          let textX = x + 3;
+          if (isNum) {
+            try {
+              const tw = font.widthOfTextAtSize(t, size);
+              textX = x + cw - 4 - tw;
+            } catch {
+              textX = x + cw - 4 - t.length * size * 0.5;
+            }
+          }
+
+          page.drawText(t, {
+            x: Math.max(x + 2, Math.min(textX, x + cw - 3)),
+            y: textY,
+            size,
+            font: isHeaderRow ? fontBold : font,
+            color: isHeaderRow ? HDR_TEXT : TEXT_COL,
+            maxWidth: cw - 5,
+          });
+
           x += cw;
         }
-        y -= lineH;
       }
+
       offset = limit;
     }
   }

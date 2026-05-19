@@ -29,6 +29,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   libreoffice \
   fonts-dejavu-core \
+  && apt-get purge -y --auto-remove \
+       default-jre-headless default-jdk-headless \
+       libreoffice-java-common \
+       openjdk-17-jre-headless openjdk-21-jre-headless \
+       2>/dev/null || true \
+  && find /usr/lib/jvm -mindepth 1 -delete 2>/dev/null || true \
+  && find /usr/lib -name "libjvm.so*" -delete 2>/dev/null || true \
+  && find /usr/lib -name "libjava.so*" -delete 2>/dev/null || true \
   && rm -rf /var/lib/apt/lists/* \
   && (soffice --version || libreoffice --version)
 

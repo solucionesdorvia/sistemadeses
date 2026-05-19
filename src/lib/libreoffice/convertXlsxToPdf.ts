@@ -150,6 +150,16 @@ export async function convertXlsxToPdfWithLibreOffice(
         continue;
       }
 
+      // Si la JVM crasheó (hs_err_pid*.log en el directorio de trabajo),
+      // LibreOffice no va a recuperarse: saltar al fallback sin reintentar.
+      const dirEntries = await readdir(outDir);
+      const jvmCrash = dirEntries.some((f) => /^hs_err_pid\d+\.log$/i.test(f));
+      if (jvmCrash) {
+        throw new Error(
+          `LibreOffice: la JVM crasheo (${dirEntries.filter((f) => /^hs_err_pid/.test(f)).join(", ")}). Usar PDF de respaldo.`,
+        );
+      }
+
       const p = await findPdf();
       if (p) {
         const b = await readFile(p);
