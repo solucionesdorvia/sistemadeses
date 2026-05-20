@@ -55,7 +55,14 @@ export async function xlsxToPdfFallback(
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const fontBoldItalic = await pdf.embedFont(StandardFonts.HelveticaBoldOblique);
   const label = basename(fileName);
+
+  // Patron de los textos "cabecera" del Excel original — el LibreOffice
+  // nativo los muestra en negrita-cursiva. Reproducimos el estilo en el
+  // fallback para que el PDF se parezca al de cuando LO funciona.
+  const isHeaderText = (s: string) =>
+    /^\s*(?:vendedor|cliente|total)\b/i.test(s);
 
   let wb: XLSX.WorkBook;
   try {
@@ -284,10 +291,12 @@ export async function xlsxToPdfFallback(
 
           const isNum =
             !isHeaderRow && sp.text.trim() !== "" && /^-?\$?\s*-?[\d.,\s]+$/.test(sp.text.trim());
+          const isHeader = isHeaderText(sp.text);
+          const chosenFont = isHeaderRow ? fontBold : isHeader ? fontBoldItalic : font;
           let textX = xStart + 3;
           if (isNum) {
             try {
-              const tw = font.widthOfTextAtSize(t, size);
+              const tw = chosenFont.widthOfTextAtSize(t, size);
               textX = xStart + w - 4 - tw;
             } catch {
               textX = xStart + w - 4 - t.length * size * 0.5;
@@ -298,7 +307,7 @@ export async function xlsxToPdfFallback(
             x: Math.max(xStart + 2, Math.min(textX, xStart + w - 3)),
             y: textY,
             size,
-            font: isHeaderRow ? fontBold : font,
+            font: chosenFont,
             color: TEXT_COL,
             maxWidth: w - 5,
           });
