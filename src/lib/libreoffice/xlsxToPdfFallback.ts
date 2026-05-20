@@ -28,11 +28,11 @@ export async function minimalPdfError(message: string): Promise<Buffer> {
 }
 
 /** A4 apaisada (pt) — para páginas de error y hojas angostas */
+/** A4 apaisado (pt) — mismo formato que el PDF que genera LibreOffice
+ *  para days. Entra holgado el renglon completo de cuenta corriente sin
+ *  truncar columnas. Si el contenido excede una pagina, se agregan mas. */
 const PAGE_W = 842.07;
 const PAGE_H = 595.28;
-/** A3 apaisada (pt) — para hojas con muchas columnas */
-const PAGE_W_A3 = 1190.55;
-const PAGE_H_A3 = 841.89;
 const MARGIN = 36;
 
 function truncateCell(s: string, max: number): string {
@@ -186,13 +186,15 @@ export async function xlsxToPdfFallback(
       continue;
     }
 
-    const isWide = gridCols.length > 5;
-    const CW = isWide ? PAGE_W_A3 : PAGE_W;
-    const CH = isWide ? PAGE_H_A3 : PAGE_H;
+    const CW = PAGE_W;
+    const CH = PAGE_H;
     const contentW = CW - 2 * MARGIN;
 
-    // Ancho por columna de la grilla: proporcional al texto mas largo
-    // observado en cualquier span que arranca alli (cap 42 % por columna).
+    // Ancho por columna: para cada col, calcular el ancho real necesario
+    // segun el texto mas largo que aparece ahi. Si la suma entra en la
+    // pagina, usar ese ancho. Si no, ir reduciendo el size hasta que
+    // entre (entre 6 y 9pt). Asi los importes "$ 2,743,923.00" entran
+    // completos y "001 CUENTA CORRIENTE" no se trunca a "CORRIE...".
     const colMaxLen = new Map<number, number>();
     for (const spans of renderRows) {
       for (const sp of spans) {
@@ -200,11 +202,32 @@ export async function xlsxToPdfFallback(
         colMaxLen.set(sp.startCol, Math.max(prev, sp.text.length));
       }
     }
-    const lens = gridCols.map((g) => Math.max(colMaxLen.get(g) ?? 0, 4));
-    const totalLen = lens.reduce((a, b) => a + b, 0) || 1;
-    const rawWidths = lens.map((l) => Math.min((l / totalLen) * contentW, contentW * 0.42));
-    const rawSum = rawWidths.reduce((a, b) => a + b, 0) || 1;
-    const colWidths = rawWidths.map((w) => (w / rawSum) * contentW);
+    const lens = gridCols.map((g) => Math.max(colMaxLen.get(g) ?? 0, 3));
+    // Padding por celda (margen izq+der dentro de la col). Lo bastante
+    // grande para que un span termine antes del proximo (sino "CORRIENTE"
+    // queda pegado al "$" del importe que viene en la col siguiente).
+    const CELL_PAD = 12;
+    const computeFit = (s: number) => {
+      const charW = s * 0.55;
+      const widths = lens.map((l) => l * charW + CELL_PAD);
+      const sum = widths.reduce((a, b) => a + b, 0);
+      return { widths, sum };
+    };
+    let size = 9;
+    let colWidths: number[];
+    let fit = computeFit(size);
+    while (fit.sum > contentW && size > 6) {
+      size -= 0.5;
+      fit = computeFit(size);
+    }
+    if (fit.sum <= contentW) {
+      // Entra holgado: escalar al ancho disponible para que use toda la pagina.
+      const factor = contentW / fit.sum;
+      colWidths = fit.widths.map((w) => w * factor);
+    } else {
+      // Ni con 6pt entra: escalar proporcionalmente y aceptar algo de truncado.
+      colWidths = fit.widths.map((w) => (w / fit.sum) * contentW);
+    }
 
     // Map startCol -> { xOffset, defaultWidth } para localizar spans.
     const colXOffset = new Map<number, number>();
@@ -219,7 +242,6 @@ export async function xlsxToPdfFallback(
     }
 
     const avgColW = contentW / Math.max(1, gridCols.length);
-    const size = Math.max(6, Math.min(9, avgColW / 6));
     const ROW_H = size * 1.6;
     const GAP_BEFORE_HEADER = size * 0.7;
     const rowCount = renderRows.length;
@@ -292,7 +314,6 @@ export async function xlsxToPdfFallback(
             size,
             font: chosenFont,
             color: TEXT_COL,
-            maxWidth: w - 5,
           });
         }
 
