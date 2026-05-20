@@ -31,6 +31,11 @@ export async function POST(request: Request) {
     const processedVendors = new Set<string>();
     const vendorIdentityMap = await loadExistingVendorIdentityMap(admin, user.id);
 
+    // Antes de procesar el lote, eliminar TODOS los archivos previos de
+    // este companyType (xlsx y pdf de cada vendedor). Cada upload es una
+    // foto fresca: lo anterior queda obsoleto.
+    await purgePreviousCompanyResults(admin, user.id, body.companyType);
+
     for (const filePath of body.filePaths) {
       const fileRow = await admin
         .from("files")
@@ -87,14 +92,6 @@ export async function POST(request: Request) {
             .from("results")
             .upload(outputPath, patched, { upsert: true });
           if (uploadResult.error) throw new Error(uploadResult.error.message);
-
-          // Borrar el PDF cacheado del vendedor (si existe) ANTES de la
-          // proxima conversion. Sin esto, si `triggerPdfConversion` falla
-          // o no se invoca, el usuario sigue viendo el PDF anterior aunque
-          // el XLSX se haya regenerado. La eliminacion es idempotente:
-          // remove() no falla si el archivo no existe.
-          const pdfPath = `${user.id}/vendedores/${safeName}/${canonicalNormalized}_${body.companyType}.pdf`;
-          await admin.storage.from("results").remove([pdfPath]);
 
           if (existingVendor) {
             const vendorUpdate = await admin
@@ -507,6 +504,44 @@ async function markFileAsError(
     .update({ status: "error", error_message: message })
     .eq("file_path", filePath)
     .eq("user_id", userId);
+}
+
+async function purgePreviousCompanyResults(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string,
+  companyType: Body["companyType"],
+) {
+  // Cada subida es una "foto" fresca de la cuenta corriente para ese
+  // companyType: barremos los xlsx/pdf previos de TODOS los vendedores
+  // antes de regenerar. Evita PDFs huerfanos cacheados como el caso que
+  // motivo este cambio (Ariel Miceli con PDF stale tras un reproceso).
+  const vendorsRoot = `${userId}/vendedores`;
+  const vendorFolders = await admin.storage.from("results").list(vendorsRoot, { limit: 1000 });
+  if (vendorFolders.error || !vendorFolders.data) return;
+
+  const xlsxSuffix = `_${companyType}.xlsx`;
+  const pdfSuffix = `_${companyType}.pdf`;
+  const pathsToRemove: string[] = [];
+
+  for (const folder of vendorFolders.data) {
+    if (!folder.name) continue;
+    const folderPath = `${vendorsRoot}/${folder.name}`;
+    const files = await admin.storage.from("results").list(folderPath, { limit: 1000 });
+    if (files.error || !files.data) continue;
+    for (const file of files.data) {
+      if (!file.name) continue;
+      if (file.name.endsWith(xlsxSuffix) || file.name.endsWith(pdfSuffix)) {
+        pathsToRemove.push(`${folderPath}/${file.name}`);
+      }
+    }
+  }
+
+  if (pathsToRemove.length === 0) return;
+  // remove() acepta hasta 1000 paths por llamada; chunk por las dudas.
+  const chunkSize = 200;
+  for (let i = 0; i < pathsToRemove.length; i += chunkSize) {
+    await admin.storage.from("results").remove(pathsToRemove.slice(i, i + chunkSize));
+  }
 }
 
 async function loadExistingVendorIdentityMap(
