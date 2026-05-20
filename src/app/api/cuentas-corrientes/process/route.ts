@@ -29,12 +29,15 @@ export async function POST(request: Request) {
     if (!user) return Response.json({ message: "Sesion invalida." }, { status: 401 });
 
     const processedVendors = new Set<string>();
+    const processedSafeFolders = new Set<string>();
     const vendorIdentityMap = await loadExistingVendorIdentityMap(admin, user.id);
 
-    // Antes de procesar el lote, eliminar TODOS los archivos previos de
-    // este companyType (xlsx y pdf de cada vendedor). Cada upload es una
-    // foto fresca: lo anterior queda obsoleto.
-    await purgePreviousCompanyResults(admin, user.id, body.companyType);
+    // Snapshot de los archivos previos de este companyType ANTES de
+    // procesar. Sirve para limpiar al final: PDFs viejos (siempre, hay
+    // que regenerarlos) y XLSX huerfanos (vendedor que ya no esta en
+    // el nuevo upload). Si el procesamiento falla y no genera ningun
+    // vendedor, no borramos nada — evita dejar la UI en cero.
+    const previousFiles = await listPreviousCompanyResults(admin, user.id, body.companyType);
 
     for (const filePath of body.filePaths) {
       const fileRow = await admin
@@ -118,6 +121,7 @@ export async function POST(request: Request) {
           }
 
           processedVendors.add(canonicalNormalized);
+          processedSafeFolders.add(safeName);
           vendorsFoundCount += 1;
         }
 
@@ -129,6 +133,30 @@ export async function POST(request: Request) {
           filePath,
           error instanceof Error ? error.message : "No se pudo procesar archivo.",
         );
+      }
+    }
+
+    // Limpieza post-procesamiento. Solo si el lote dejo al menos 1
+    // vendedor procesado — asi un upload roto no borra todo.
+    if (processedSafeFolders.size > 0) {
+      const pathsToRemove: string[] = [];
+      for (const prev of previousFiles) {
+        const isPdf = prev.path.endsWith(".pdf");
+        // PDFs viejos: siempre borrar (los nuevos los regenera convert-pdf).
+        if (isPdf) {
+          pathsToRemove.push(prev.path);
+          continue;
+        }
+        // XLSX huerfanos: vendedor que ya no esta en la foto nueva.
+        if (!processedSafeFolders.has(prev.safeFolder)) {
+          pathsToRemove.push(prev.path);
+        }
+      }
+      if (pathsToRemove.length > 0) {
+        const chunkSize = 200;
+        for (let i = 0; i < pathsToRemove.length; i += chunkSize) {
+          await admin.storage.from("results").remove(pathsToRemove.slice(i, i + chunkSize));
+        }
       }
     }
 
@@ -506,22 +534,18 @@ async function markFileAsError(
     .eq("user_id", userId);
 }
 
-async function purgePreviousCompanyResults(
+async function listPreviousCompanyResults(
   admin: ReturnType<typeof createAdminClient>,
   userId: string,
   companyType: Body["companyType"],
-) {
-  // Cada subida es una "foto" fresca de la cuenta corriente para ese
-  // companyType: barremos los xlsx/pdf previos de TODOS los vendedores
-  // antes de regenerar. Evita PDFs huerfanos cacheados como el caso que
-  // motivo este cambio (Ariel Miceli con PDF stale tras un reproceso).
+): Promise<Array<{ path: string; safeFolder: string }>> {
   const vendorsRoot = `${userId}/vendedores`;
   const vendorFolders = await admin.storage.from("results").list(vendorsRoot, { limit: 1000 });
-  if (vendorFolders.error || !vendorFolders.data) return;
+  if (vendorFolders.error || !vendorFolders.data) return [];
 
   const xlsxSuffix = `_${companyType}.xlsx`;
   const pdfSuffix = `_${companyType}.pdf`;
-  const pathsToRemove: string[] = [];
+  const collected: Array<{ path: string; safeFolder: string }> = [];
 
   for (const folder of vendorFolders.data) {
     if (!folder.name) continue;
@@ -531,17 +555,15 @@ async function purgePreviousCompanyResults(
     for (const file of files.data) {
       if (!file.name) continue;
       if (file.name.endsWith(xlsxSuffix) || file.name.endsWith(pdfSuffix)) {
-        pathsToRemove.push(`${folderPath}/${file.name}`);
+        collected.push({
+          path: `${folderPath}/${file.name}`,
+          safeFolder: folder.name,
+        });
       }
     }
   }
 
-  if (pathsToRemove.length === 0) return;
-  // remove() acepta hasta 1000 paths por llamada; chunk por las dudas.
-  const chunkSize = 200;
-  for (let i = 0; i < pathsToRemove.length; i += chunkSize) {
-    await admin.storage.from("results").remove(pathsToRemove.slice(i, i + chunkSize));
-  }
+  return collected;
 }
 
 async function loadExistingVendorIdentityMap(
