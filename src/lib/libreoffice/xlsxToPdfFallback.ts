@@ -164,28 +164,23 @@ export async function xlsxToPdfFallback(
       rowSpans.push(spans);
     }
 
-    const title = `Cuenta corriente — ${sheetName} — ${label}`;
     const gridCols = [...startColSet].sort((a, b) => a - b);
+
+    // Filtrar a solo las filas que tienen contenido. El Excel original
+    // tiene muchas rows separadoras de altura minima (0.75pt) que en LO
+    // casi no se ven, pero el fallback les da altura completa y termina
+    // ocupando 3 paginas. Sacarlas reproduce mejor la version original.
+    const renderRows = rowSpans.filter((spans) => spans.some((s) => s.text.trim()));
 
     // Si no hay merges relevantes ni datos en cols separadas, no podemos
     // armar una grilla útil — saltar al render plano por celdas.
     if (gridCols.length < 2) {
       const p = pdf.addPage([PAGE_W, PAGE_H]);
-      p.drawText(title, {
-        x: MARGIN,
-        y: PAGE_H - MARGIN - 14,
-        size: 11,
-        font: fontBold,
-        color: rgb(0, 0, 0.35),
-        maxWidth: PAGE_W - 2 * MARGIN,
-      });
-      let yCursor = PAGE_H - MARGIN - 38;
-      for (const spans of rowSpans) {
+      let yCursor = PAGE_H - MARGIN - 14;
+      for (const spans of renderRows) {
         if (yCursor < MARGIN + 12) break;
         const line = spans.map((s) => s.text).join("  ");
-        if (line.trim()) {
-          p.drawText(truncateCell(line, 200), { x: MARGIN, y: yCursor, size: 8, font });
-        }
+        p.drawText(truncateCell(line, 200), { x: MARGIN, y: yCursor, size: 8, font });
         yCursor -= 12;
       }
       continue;
@@ -199,7 +194,7 @@ export async function xlsxToPdfFallback(
     // Ancho por columna de la grilla: proporcional al texto mas largo
     // observado en cualquier span que arranca alli (cap 42 % por columna).
     const colMaxLen = new Map<number, number>();
-    for (const spans of rowSpans) {
+    for (const spans of renderRows) {
       for (const sp of spans) {
         const prev = colMaxLen.get(sp.startCol) ?? 0;
         colMaxLen.set(sp.startCol, Math.max(prev, sp.text.length));
@@ -225,11 +220,9 @@ export async function xlsxToPdfFallback(
 
     const avgColW = contentW / Math.max(1, gridCols.length);
     const size = Math.max(6, Math.min(9, avgColW / 6));
-    const ROW_H = size * 2.1;
-    const TITLE_BLOCK = 28;
-    const rowAreaH = CH - 2 * MARGIN - TITLE_BLOCK;
-    const rowsPerPage = Math.max(1, Math.floor(rowAreaH / ROW_H));
-    const rowCount = rowSpans.length;
+    const ROW_H = size * 1.6;
+    const GAP_BEFORE_HEADER = size * 0.7;
+    const rowCount = renderRows.length;
 
     const TEXT_COL = rgb(0, 0, 0);
 
@@ -245,34 +238,24 @@ export async function xlsxToPdfFallback(
       return w;
     };
 
-    let offset = 0;
-    let part = 0;
-    const pageParts = Math.max(1, Math.ceil(rowCount / rowsPerPage));
-    while (offset < rowCount) {
-      part += 1;
+    let ri = 0;
+    while (ri < rowCount) {
       const page = pdf.addPage([CW, CH]);
-      const head =
-        rowCount > rowsPerPage ? `${title}  (parte ${part} de ${pageParts})` : title;
-      page.drawText(truncateCell(head, 200), {
-        x: MARGIN,
-        y: CH - MARGIN - 10,
-        size: 9,
-        font: fontBold,
-        color: rgb(0, 0, 0.35),
-        maxWidth: contentW,
-      });
+      let yCursor = CH - MARGIN;
+      const yMin = MARGIN + ROW_H;
 
-      const startY = CH - MARGIN - TITLE_BLOCK;
-      const limit = Math.min(offset + rowsPerPage, rowCount);
-      const headerRowIdx = rowSpans.findIndex((spans) => spans.some((s) => s.text.trim()));
+      while (ri < rowCount) {
+        const rowHasHeader = renderRows[ri]!.some((s) => isHeaderText(s.text));
+        // Gap antes de Vendedor/Cliente/Total (excepto la 1ra fila de la pagina).
+        const needsGap = rowHasHeader && yCursor < CH - MARGIN;
+        const rowAdvance = ROW_H + (needsGap ? GAP_BEFORE_HEADER : 0);
+        if (yCursor - rowAdvance < yMin) break;
+        if (needsGap) yCursor -= GAP_BEFORE_HEADER;
 
-      for (let ri = offset; ri < limit; ri += 1) {
-        const localIdx = ri - offset;
-        const rowBottom = startY - (localIdx + 1) * ROW_H;
+        const rowBottom = yCursor - ROW_H;
         const textY = rowBottom + ROW_H * 0.3;
-        const isHeaderRow = ri === headerRowIdx;
 
-        for (const sp of rowSpans[ri]!) {
+        for (const sp of renderRows[ri]!) {
           if (!sp.text.trim()) continue;
           // Buscar la col de la grilla "ancla" mas cercana <= sp.startCol.
           let anchorCol = sp.startCol;
@@ -289,10 +272,10 @@ export async function xlsxToPdfFallback(
           const cap = Math.max(8, Math.floor(w / (size * 0.55)));
           const t = truncateCell(sp.text, cap);
 
-          const isNum =
-            !isHeaderRow && sp.text.trim() !== "" && /^-?\$?\s*-?[\d.,\s]+$/.test(sp.text.trim());
           const isHeader = isHeaderText(sp.text);
-          const chosenFont = isHeaderRow ? fontBold : isHeader ? fontBoldItalic : font;
+          const isNum =
+            !isHeader && sp.text.trim() !== "" && /^-?\$?\s*-?[\d.,\s]+$/.test(sp.text.trim());
+          const chosenFont = isHeader ? fontBoldItalic : font;
           let textX = xStart + 3;
           if (isNum) {
             try {
@@ -312,9 +295,10 @@ export async function xlsxToPdfFallback(
             maxWidth: w - 5,
           });
         }
-      }
 
-      offset = limit;
+        yCursor -= ROW_H;
+        ri += 1;
+      }
     }
   }
 
