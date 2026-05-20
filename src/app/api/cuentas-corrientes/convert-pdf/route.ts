@@ -66,17 +66,19 @@ export async function POST(request: Request) {
     );
 
     const normalizedTarget = body.vendorName?.trim().toLowerCase() ?? null;
-    // Tras subir por empresa, siempre se pasa `companyType`: convertir para todos
-    // los vendedores con XLSX de ese lote, sin exigir `convert_to_pdf` (el flag
-    // sigue valiendo para email/Drive y llamadas sin companyType ni vendorName).
-    const scopeFromUpload = Boolean(body.companyType || body.vendorName);
+    // Si vino vendorName, el usuario lo seleccionó explicitamente (boton
+    // "Generar PDF" del vendedor): procesar siempre.
+    // Si no vino vendorName (batch por companyType desde upload, o sin
+    // scope): exigir convert_to_pdf=true. Asi un upload no regenera PDFs
+    // para vendedores marcados como "sin PDF" en config.
+    const isExplicitVendor = Boolean(body.vendorName);
     const selectedVendors = (vendorsResult.data ?? []).filter((vendor) => {
       const matchesByName = normalizedTarget
         ? vendor.normalized_name.toLowerCase() === normalizedTarget ||
           (vendor.canonical_name ?? "").toLowerCase() === normalizedTarget
         : true;
       if (!matchesByName) return false;
-      if (scopeFromUpload) return true;
+      if (isExplicitVendor) return true;
       return Boolean(vendor.convert_to_pdf);
     });
 
@@ -140,8 +142,9 @@ export async function POST(request: Request) {
 
     let message: string | undefined;
     if (selectedVendors.length === 0) {
-      message =
-        "No hay vendedores para convertir. Con ambito restringido, revisa el nombre; sin companyType/vendorName hace falta 'PDF' activo en vendedor.";
+      message = isExplicitVendor
+        ? `No se encontro el vendedor '${body.vendorName}' en la base.`
+        : "No hay vendedores con 'PDF' activo en configuracion. Activa la columna convert_to_pdf en los vendors que necesites.";
     } else if (xlsxFound === 0) {
       message = `Cero XLSX encontrados para ${selectedVendors.length} vendedores. Sufijo buscado: ${companySuffix}. Revisar paths en results/.../vendedores/.`;
     } else if (converted === 0 && errors.length === 0) {
