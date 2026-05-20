@@ -122,50 +122,88 @@ export async function convertXlsxToPdfWithLibreOffice(
   ];
 
   let lastErrorMessage = "";
+  const debugTag = `[LO-DEBUG ${Date.now()}]`;
   try {
+    console.log(
+      `${debugTag} inicio xlsx=${xlsx.byteLength}b filename=${_fileName} tempRoot=${tempRoot} loCommand=${loCommand}`,
+    );
     for (const pass of passes) {
       await writeFile(inPath, pass.input);
+      const inputLabel = pass.input === patched ? "patched" : "original";
+      console.log(
+        `${debugTag} pasada filter=${pass.filter} input=${inputLabel} bytes=${pass.input.byteLength}`,
+      );
+      let stdoutCaptured = "";
+      let stderrCaptured = "";
       try {
-        await execFileAsync(loCommand, argsFor(pass.filter), {
+        const r = await execFileAsync(loCommand, argsFor(pass.filter), {
           env: loEnv,
           cwd: outDir,
           timeout: 120_000,
           maxBuffer: 20 * 1024 * 1024,
         });
+        stdoutCaptured = r.stdout?.toString() ?? "";
+        stderrCaptured = r.stderr?.toString() ?? "";
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        // Loguear COMPLETO en consola (Railway logs) — sin truncar — para
-        // diagnosticar por qué LibreOffice rechaza un XLSX puntual.
+        // execFile error puede traer stdout/stderr embebidos
+        const err = e as { stdout?: string | Buffer; stderr?: string | Buffer };
+        stdoutCaptured = err?.stdout?.toString() ?? "";
+        stderrCaptured = err?.stderr?.toString() ?? "";
         console.error(
-          `[convertXlsxToPdfWithLibreOffice] pasada filter=${pass.filter} input=${pass.input === patched ? "patched" : "original"} bytes=${pass.input.byteLength} fallo:`,
-          msg,
+          `${debugTag} pasada filter=${pass.filter} input=${inputLabel} FALLO. msg=${msg}`,
         );
+        console.error(`${debugTag} stdout: ${stdoutCaptured || "(vacio)"}`);
+        console.error(`${debugTag} stderr: ${stderrCaptured || "(vacio)"}`);
         if (/cannot fork|ENOMEM|out of memory/i.test(msg)) {
           throw new Error(
-            `LibreOffice: recurso agotado en el servidor (Cannot fork / memoria). Usar un plan con mas RAM o el PDF de respaldo se aplicara. ${msg}`,
+            `LibreOffice: recurso agotado en el servidor (Cannot fork / memoria). ${msg}`,
           );
         }
-        lastErrorMessage = `filter=${pass.filter} input=${pass.input === patched ? "patched" : "original"}: ${msg}`;
-        // No tirar: seguir a la pasada siguiente (XLSX original sin parchar).
+        lastErrorMessage = `filter=${pass.filter} input=${inputLabel}: ${msg} | stderr=${stderrCaptured.slice(0, 800)}`;
         continue;
       }
+      console.log(`${debugTag} pasada filter=${pass.filter} OK. stdout=${stdoutCaptured.slice(0, 500) || "(vacio)"} stderr=${stderrCaptured.slice(0, 500) || "(vacio)"}`);
 
-      // Si la JVM crasheó (hs_err_pid*.log en el directorio de trabajo),
-      // LibreOffice no va a recuperarse: saltar al fallback sin reintentar.
+      // Listar TODOS los archivos del outDir tras correr LO
       const dirEntries = await readdir(outDir);
-      const jvmCrash = dirEntries.some((f) => /^hs_err_pid\d+\.log$/i.test(f));
-      if (jvmCrash) {
-        throw new Error(
-          `LibreOffice: la JVM crasheo (${dirEntries.filter((f) => /^hs_err_pid/.test(f)).join(", ")}). Usar PDF de respaldo.`,
-        );
+      console.log(`${debugTag} outDir contiene: ${dirEntries.join(", ")}`);
+
+      // Si hay hs_err_pid*.log (crash JVM), leerlo COMPLETO
+      const crashFiles = dirEntries.filter((f) => /^hs_err_pid\d+\.log$/i.test(f));
+      for (const cf of crashFiles) {
+        try {
+          const content = await readFile(`${outDir}/${cf}`, "utf-8");
+          console.error(`${debugTag} crash log ${cf} (${content.length} chars):\n${content.slice(0, 4000)}`);
+        } catch (readErr) {
+          console.error(`${debugTag} no se pudo leer ${cf}:`, readErr);
+        }
+      }
+      if (crashFiles.length > 0) {
+        throw new Error(`LibreOffice: la JVM crasheo (${crashFiles.join(", ")}).`);
+      }
+
+      // Tambien intentar leer cualquier .log generado por LO
+      const otherLogs = dirEntries.filter((f) => /\.log$/i.test(f) && !crashFiles.includes(f));
+      for (const lf of otherLogs) {
+        try {
+          const content = await readFile(`${outDir}/${lf}`, "utf-8");
+          console.log(`${debugTag} log ${lf}:\n${content.slice(0, 2000)}`);
+        } catch {
+          // ignore
+        }
       }
 
       const p = await findPdf();
       if (p) {
         const b = await readFile(p);
+        console.log(`${debugTag} pdf generado en ${p}, bytes=${b.length}`);
         if (b.length > 0) {
           return b;
         }
+        console.warn(`${debugTag} pdf encontrado pero vacio (0 bytes)`);
+      } else {
+        console.warn(`${debugTag} no se encontro pdf en outDir despues de la pasada filter=${pass.filter}`);
       }
     }
 
