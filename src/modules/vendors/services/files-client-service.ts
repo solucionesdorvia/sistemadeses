@@ -68,16 +68,23 @@ export async function uploadCuentaCorrienteFiles(
         { duration: 12_000 },
       );
     } else {
-      if (convertPayload.message) {
-        toast.info(convertPayload.message, { duration: 8_000 });
-      }
+      const vendorsScanned = convertPayload.vendorsScanned ?? 0;
+      const xlsxFound = convertPayload.xlsxFound ?? 0;
+      const stat = `vendedores=${vendorsScanned} xlsx=${xlsxFound} pdf=${convertPayload.converted} errores=${convertPayload.errors.length}`;
+
       if (convertPayload.errors.length > 0) {
+        const first = convertPayload.errors[0];
         toast.error(
-          `PDF: ${convertPayload.errors[0]?.vendor} — ${convertPayload.errors[0]?.reason ?? "error"}`,
-          { duration: 10_000 },
+          `PDF parcial (${stat}). 1er error: ${first?.vendor} — ${first?.reason ?? "error"}`,
+          { duration: 12_000 },
         );
       } else if (convertPayload.converted > 0) {
-        toast.success(`PDF: ${convertPayload.converted} archivo(s) generado(s).`);
+        toast.success(`PDF: ${convertPayload.converted} archivo(s) generado(s) (${stat}).`);
+      } else if (convertPayload.message) {
+        // converted=0 sin errores: mostrar el motivo explicito del servidor.
+        toast.info(`${convertPayload.message} (${stat})`, { duration: 12_000 });
+      } else {
+        toast.info(`PDF: 0 generados sin error reportado (${stat}).`, { duration: 12_000 });
       }
     }
   } catch (error) {
@@ -135,6 +142,8 @@ async function normalizeCuentaCorrienteInputFile(file: File) {
 type ConvertPdfResponse = {
   ok: boolean;
   converted: number;
+  vendorsScanned?: number;
+  xlsxFound?: number;
   errors: Array<{ vendor: string; file: string; reason: string }>;
   /** Aviso informativo (p. ej. cero archivos o sin vendedores) */
   message?: string;

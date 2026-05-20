@@ -54,8 +54,13 @@ export async function POST(request: Request) {
     }
 
     let converted = 0;
+    let xlsxFound = 0;
     const errors: Array<{ vendor: string; file: string; reason: string }> = [];
     const companySuffix = body.companyType ? `_${body.companyType}.xlsx` : ".xlsx";
+
+    console.log(
+      `[convert-pdf] inicio companyType=${body.companyType ?? "(todos)"} vendorName=${body.vendorName ?? "(todos)"} userId=${user.id}`,
+    );
 
     const normalizedTarget = body.vendorName?.trim().toLowerCase() ?? null;
     // Tras subir por empresa, siempre se pasa `companyType`: convertir para todos
@@ -90,6 +95,12 @@ export async function POST(request: Request) {
       const targets = (listed.data ?? []).filter((file) => {
         return body.companyType ? file.name.endsWith(companySuffix) : file.name.endsWith(".xlsx");
       });
+      xlsxFound += targets.length;
+      if (targets.length === 0) {
+        console.log(
+          `[convert-pdf] vendor=${displayName} baseFolder=${baseFolder} sin xlsx (listado.data=${listed.data?.length ?? 0} files; companySuffix=${companySuffix})`,
+        );
+      }
 
       for (const file of targets) {
         const filePath = `${baseFolder}/${file.name}`;
@@ -110,12 +121,15 @@ export async function POST(request: Request) {
           if (uploaded.error) {
             throw new Error(uploaded.error.message);
           }
+          console.log(`[convert-pdf] vendor=${displayName} file=${file.name} OK (${pdfBytes.length} bytes)`);
           converted += 1;
         } catch (error) {
+          const reason = error instanceof Error ? error.message : "Error al convertir.";
+          console.error(`[convert-pdf] vendor=${displayName} file=${file.name} FALLO:`, reason);
           errors.push({
             vendor: displayName,
             file: file.name,
-            reason: error instanceof Error ? error.message : "Error al convertir.",
+            reason,
           });
         }
       }
@@ -125,13 +139,21 @@ export async function POST(request: Request) {
     if (selectedVendors.length === 0) {
       message =
         "No hay vendedores para convertir. Con ambito restringido, revisa el nombre; sin companyType/vendorName hace falta 'PDF' activo en vendedor.";
+    } else if (xlsxFound === 0) {
+      message = `Cero XLSX encontrados para ${selectedVendors.length} vendedores. Sufijo buscado: ${companySuffix}. Revisar paths en results/.../vendedores/.`;
     } else if (converted === 0 && errors.length === 0) {
       message = "Ningun archivo .xlsx coincidente en resultados (carpeta de vendedor / sufijo de empresa).";
     }
 
+    console.log(
+      `[convert-pdf] fin vendedores=${selectedVendors.length} xlsxFound=${xlsxFound} converted=${converted} errors=${errors.length}`,
+    );
+
     return Response.json({
       ok: true,
       converted,
+      vendorsScanned: selectedVendors.length,
+      xlsxFound,
       errors,
       ...(message ? { message } : {}),
     });
