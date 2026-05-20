@@ -88,6 +88,14 @@ export async function POST(request: Request) {
             .upload(outputPath, patched, { upsert: true });
           if (uploadResult.error) throw new Error(uploadResult.error.message);
 
+          // Borrar el PDF cacheado del vendedor (si existe) ANTES de la
+          // proxima conversion. Sin esto, si `triggerPdfConversion` falla
+          // o no se invoca, el usuario sigue viendo el PDF anterior aunque
+          // el XLSX se haya regenerado. La eliminacion es idempotente:
+          // remove() no falla si el archivo no existe.
+          const pdfPath = `${user.id}/vendedores/${safeName}/${canonicalNormalized}_${body.companyType}.pdf`;
+          await admin.storage.from("results").remove([pdfPath]);
+
           if (existingVendor) {
             const vendorUpdate = await admin
               .from("vendors")
