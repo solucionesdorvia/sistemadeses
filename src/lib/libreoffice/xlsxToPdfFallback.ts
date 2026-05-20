@@ -116,62 +116,129 @@ export async function xlsxToPdfFallback(
     }
 
     const range = XLSX.utils.decode_range(sheet["!ref"]);
-    const colCount = range.e.c - range.s.c + 1;
-    const rowCount = range.e.r - range.s.r + 1;
-    const rows: string[][] = [];
+    const merges = (sheet["!merges"] ?? []) as XLSX.Range[];
+
+    // Una "celda visual" es lo que el usuario ve en Excel: cualquier merge
+    // (B5:F5 → un solo bloque ancho con su texto) o cualquier celda suelta
+    // con contenido. Trabajar con spans en vez de celdas crudas es lo que
+    // evita el problema de Desesplast: ~50 columnas estrechas con merges
+    // todos los renglones renderizadas individualmente truncan a 1 char.
+    type Span = { startCol: number; endCol: number; text: string };
+    const rowSpans: Span[][] = [];
+    const startColSet = new Set<number>();
+
+    const readCellText = (r: number, c: number) => {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = sheet[addr] as { w?: string; v?: unknown } | undefined;
+      if (!cell) return "";
+      if (cell.w != null && String(cell.w).length > 0) return String(cell.w);
+      if (cell.v != null) return String(cell.v);
+      return "";
+    };
+
     for (let r = range.s.r; r <= range.e.r; r += 1) {
-      const row: string[] = [];
-      for (let c = range.s.c; c <= range.e.c; c += 1) {
-        const addr = XLSX.utils.encode_cell({ r, c });
-        const cell = sheet[addr] as { w?: string; v?: unknown } | undefined;
-        let text = "";
-        if (cell) {
-          text =
-            cell.w != null && String(cell.w).length > 0
-              ? String(cell.w)
-              : cell.v != null
-                ? String(cell.v)
-                : "";
-        }
-        row.push(text);
+      const spans: Span[] = [];
+      const consumed = new Set<number>();
+      for (const m of merges) {
+        if (m.s.r !== r) continue;
+        const text = readCellText(m.s.r, m.s.c);
+        spans.push({ startCol: m.s.c, endCol: m.e.c, text });
+        for (let c = m.s.c; c <= m.e.c; c += 1) consumed.add(c);
       }
-      rows.push(row);
+      for (let c = range.s.c; c <= range.e.c; c += 1) {
+        if (consumed.has(c)) continue;
+        const text = readCellText(r, c);
+        if (text.trim()) spans.push({ startCol: c, endCol: c, text });
+      }
+      spans.sort((a, b) => a.startCol - b.startCol);
+      for (const sp of spans) {
+        if (sp.text.trim()) startColSet.add(sp.startCol);
+      }
+      rowSpans.push(spans);
     }
 
     const title = `Cuenta corriente — ${sheetName} — ${label}`;
+    const gridCols = [...startColSet].sort((a, b) => a - b);
 
-    // A3 apaisado para hojas con muchas columnas, A4 para pocas.
-    const isWide = colCount > 6;
+    // Si no hay merges relevantes ni datos en cols separadas, no podemos
+    // armar una grilla útil — saltar al render plano por celdas.
+    if (gridCols.length < 2) {
+      const p = pdf.addPage([PAGE_W, PAGE_H]);
+      p.drawText(title, {
+        x: MARGIN,
+        y: PAGE_H - MARGIN - 14,
+        size: 11,
+        font: fontBold,
+        color: rgb(0, 0, 0.35),
+        maxWidth: PAGE_W - 2 * MARGIN,
+      });
+      let yCursor = PAGE_H - MARGIN - 38;
+      for (const spans of rowSpans) {
+        if (yCursor < MARGIN + 12) break;
+        const line = spans.map((s) => s.text).join("  ");
+        if (line.trim()) {
+          p.drawText(truncateCell(line, 200), { x: MARGIN, y: yCursor, size: 8, font });
+        }
+        yCursor -= 12;
+      }
+      continue;
+    }
+
+    const isWide = gridCols.length > 5;
     const CW = isWide ? PAGE_W_A3 : PAGE_W;
     const CH = isWide ? PAGE_H_A3 : PAGE_H;
     const contentW = CW - 2 * MARGIN;
 
-    // Anchos de columna proporcionales al contenido real de cada columna.
-    // Cap por columna: 42 % del ancho total para evitar que una columna
-    // con texto muy largo consuma toda la página.
-    const maxLens = Array(colCount).fill(0) as number[];
-    for (const row of rows) {
-      for (let c = 0; c < colCount; c++) {
-        maxLens[c] = Math.max(maxLens[c]!, (row[c] ?? "").length);
+    // Ancho por columna de la grilla: proporcional al texto mas largo
+    // observado en cualquier span que arranca alli (cap 42 % por columna).
+    const colMaxLen = new Map<number, number>();
+    for (const spans of rowSpans) {
+      for (const sp of spans) {
+        const prev = colMaxLen.get(sp.startCol) ?? 0;
+        colMaxLen.set(sp.startCol, Math.max(prev, sp.text.length));
       }
     }
-    const totalLenRaw = maxLens.reduce((a, b) => a + Math.max(b, 3), 0) || 1;
-    const rawWidths = maxLens.map((len) =>
-      Math.min((Math.max(len, 3) / totalLenRaw) * contentW, contentW * 0.42),
-    );
+    const lens = gridCols.map((g) => Math.max(colMaxLen.get(g) ?? 0, 4));
+    const totalLen = lens.reduce((a, b) => a + b, 0) || 1;
+    const rawWidths = lens.map((l) => Math.min((l / totalLen) * contentW, contentW * 0.42));
     const rawSum = rawWidths.reduce((a, b) => a + b, 0) || 1;
     const colWidths = rawWidths.map((w) => (w / rawSum) * contentW);
 
-    const avgColW = contentW / Math.max(1, colCount);
-    const size = Math.max(5, Math.min(8, avgColW / 2.8));
+    // Map startCol -> { xOffset, defaultWidth } para localizar spans.
+    const colXOffset = new Map<number, number>();
+    const colWidthByStart = new Map<number, number>();
+    {
+      let accum = 0;
+      for (let i = 0; i < gridCols.length; i += 1) {
+        colXOffset.set(gridCols[i]!, accum);
+        colWidthByStart.set(gridCols[i]!, colWidths[i]!);
+        accum += colWidths[i]!;
+      }
+    }
+
+    const avgColW = contentW / Math.max(1, gridCols.length);
+    const size = Math.max(6, Math.min(9, avgColW / 6));
     const ROW_H = size * 2.1;
     const TITLE_BLOCK = 28;
     const rowAreaH = CH - 2 * MARGIN - TITLE_BLOCK;
     const rowsPerPage = Math.max(1, Math.floor(rowAreaH / ROW_H));
+    const rowCount = rowSpans.length;
 
     const WHITE = rgb(1, 1, 1);
     const CELL_BORDER = rgb(0.72, 0.72, 0.72);
     const TEXT_COL = rgb(0, 0, 0);
+
+    // Helper: ancho cubierto por un span que arranca en startCol y termina
+    // en endCol (sumando los anchos de las cols de la grilla cuyo startCol
+    // cae dentro del rango del span).
+    const spanRenderWidth = (startCol: number, endCol: number) => {
+      let w = colWidthByStart.get(startCol) ?? avgColW;
+      for (let i = 0; i < gridCols.length; i += 1) {
+        const g = gridCols[i]!;
+        if (g > startCol && g <= endCol) w += colWidths[i]!;
+      }
+      return w;
+    };
 
     let offset = 0;
     let part = 0;
@@ -180,9 +247,7 @@ export async function xlsxToPdfFallback(
       part += 1;
       const page = pdf.addPage([CW, CH]);
       const head =
-        rowCount > rowsPerPage
-          ? `${title}  (parte ${part} de ${pageParts})`
-          : title;
+        rowCount > rowsPerPage ? `${title}  (parte ${part} de ${pageParts})` : title;
       page.drawText(truncateCell(head, 200), {
         x: MARGIN,
         y: CH - MARGIN - 10,
@@ -194,58 +259,66 @@ export async function xlsxToPdfFallback(
 
       const startY = CH - MARGIN - TITLE_BLOCK;
       const limit = Math.min(offset + rowsPerPage, rowCount);
+      const headerRowIdx = rowSpans.findIndex((spans) => spans.some((s) => s.text.trim()));
 
       for (let ri = offset; ri < limit; ri += 1) {
         const localIdx = ri - offset;
         const rowBottom = startY - (localIdx + 1) * ROW_H;
-        // Baseline de texto a ~30 % de la altura de la fila desde abajo.
         const textY = rowBottom + ROW_H * 0.3;
+        const isHeaderRow = ri === headerRowIdx;
 
-        const isHeaderRow = ri === range.s.r;
-
-        let x = MARGIN;
-        for (let c = 0; c < colCount; c += 1) {
-          const cw = colWidths[c] ?? avgColW;
-          const raw = String(rows[ri]![c] ?? "");
-          const cap = Math.max(14, Math.floor(cw / (size * 0.52)));
-          const t = truncateCell(raw, cap);
-
-          // Celda: fondo blanco + borde gris
+        // Bordes de grilla en TODAS las cols de la fila (para que sea
+        // visible aunque la celda este vacia).
+        for (let i = 0; i < gridCols.length; i += 1) {
+          const xCell = MARGIN + (colXOffset.get(gridCols[i]!) ?? 0);
           page.drawRectangle({
-            x,
+            x: xCell,
             y: rowBottom,
-            width: cw,
+            width: colWidths[i]!,
             height: ROW_H,
             color: WHITE,
             borderColor: CELL_BORDER,
             borderWidth: 0.35,
           });
+        }
 
-          // Alinear números a la derecha
+        for (const sp of rowSpans[ri]!) {
+          if (!sp.text.trim()) continue;
+          // Buscar la col de la grilla "ancla" mas cercana <= sp.startCol.
+          let anchorCol = sp.startCol;
+          if (!colXOffset.has(anchorCol)) {
+            for (let i = gridCols.length - 1; i >= 0; i -= 1) {
+              if (gridCols[i]! <= sp.startCol) {
+                anchorCol = gridCols[i]!;
+                break;
+              }
+            }
+          }
+          const xStart = MARGIN + (colXOffset.get(anchorCol) ?? 0);
+          const w = spanRenderWidth(anchorCol, sp.endCol);
+          const cap = Math.max(8, Math.floor(w / (size * 0.55)));
+          const t = truncateCell(sp.text, cap);
+
           const isNum =
-            !isHeaderRow &&
-            raw.trim() !== "" &&
-            /^-?[\d.,\s]+$/.test(raw.trim());
-          let textX = x + 3;
+            !isHeaderRow && sp.text.trim() !== "" && /^-?\$?\s*-?[\d.,\s]+$/.test(sp.text.trim());
+          let textX = xStart + 3;
           if (isNum) {
             try {
               const tw = font.widthOfTextAtSize(t, size);
-              textX = x + cw - 4 - tw;
+              textX = xStart + w - 4 - tw;
             } catch {
-              textX = x + cw - 4 - t.length * size * 0.5;
+              textX = xStart + w - 4 - t.length * size * 0.5;
             }
           }
 
           page.drawText(t, {
-            x: Math.max(x + 2, Math.min(textX, x + cw - 3)),
+            x: Math.max(xStart + 2, Math.min(textX, xStart + w - 3)),
             y: textY,
             size,
             font: isHeaderRow ? fontBold : font,
             color: TEXT_COL,
-            maxWidth: cw - 5,
+            maxWidth: w - 5,
           });
-
-          x += cw;
         }
       }
 

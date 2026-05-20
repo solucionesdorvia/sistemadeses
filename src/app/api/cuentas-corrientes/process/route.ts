@@ -223,6 +223,8 @@ type LiteralCropContext = {
   zip: JSZip;
   worksheetPath: string;
   sourceWorksheetXml: string;
+  sharedStringsPath: string | null;
+  sourceSharedStringsXml: string | null;
 };
 
 async function createLiteralCropContext(sourceWorkbookBuffer: ArrayBuffer): Promise<LiteralCropContext> {
@@ -231,7 +233,19 @@ async function createLiteralCropContext(sourceWorkbookBuffer: ArrayBuffer): Prom
   const worksheetFile = zip.file(worksheetPath);
   if (!worksheetFile) throw new Error("No se encontro worksheet en el archivo XLSX.");
   const sourceWorksheetXml = await worksheetFile.async("text");
-  return { zip, worksheetPath, sourceWorksheetXml };
+
+  // sharedStrings es opcional (algunos XLSX guardan strings inline).
+  const sharedStringsPath = "xl/sharedStrings.xml";
+  const sharedStringsFile = zip.file(sharedStringsPath);
+  const sourceSharedStringsXml = sharedStringsFile ? await sharedStringsFile.async("text") : null;
+
+  return {
+    zip,
+    worksheetPath,
+    sourceWorksheetXml,
+    sharedStringsPath: sourceSharedStringsXml ? sharedStringsPath : null,
+    sourceSharedStringsXml,
+  };
 }
 
 async function cropXlsxWorkbookFromContext(
@@ -239,10 +253,87 @@ async function cropXlsxWorkbookFromContext(
   ranges: Array<{ start: number; end: number }>,
 ) {
   const croppedWorksheetXml = cropWorksheetXmlByRanges(context.sourceWorksheetXml, ranges);
-  context.zip.file(context.worksheetPath, croppedWorksheetXml);
+
+  // El XLSX original suele tener un sharedStrings con TODOS los strings de
+  // todos los vendedores (~500 KB en Desesplast). Si no lo recortamos al
+  // subset usado por las filas conservadas, LibreOffice rechaza el archivo
+  // en modo --nojava y cae al fallback de pdf-lib.
+  let finalWorksheetXml = croppedWorksheetXml;
+  let finalSharedStringsXml: string | null = null;
+  if (context.sharedStringsPath && context.sourceSharedStringsXml) {
+    const rewritten = rebuildSharedStringsForCroppedSheet(
+      croppedWorksheetXml,
+      context.sourceSharedStringsXml,
+    );
+    finalWorksheetXml = rewritten.worksheetXml;
+    finalSharedStringsXml = rewritten.sharedStringsXml;
+  }
+
+  context.zip.file(context.worksheetPath, finalWorksheetXml);
+  if (context.sharedStringsPath && finalSharedStringsXml !== null) {
+    context.zip.file(context.sharedStringsPath, finalSharedStringsXml);
+  }
+
   const out = await context.zip.generateAsync({ type: "uint8array" });
+
+  // Restaurar para que la proxima iteracion arranque del XLSX intacto.
   context.zip.file(context.worksheetPath, context.sourceWorksheetXml);
+  if (context.sharedStringsPath && context.sourceSharedStringsXml !== null) {
+    context.zip.file(context.sharedStringsPath, context.sourceSharedStringsXml);
+  }
   return out;
+}
+
+function rebuildSharedStringsForCroppedSheet(croppedWorksheetXml: string, originalSharedStringsXml: string) {
+  // 1) Lista de <si>...</si> del sharedStrings original (no usamos parser XML
+  //    para no traer otra dependencia; el patron es muy estable).
+  const siBlocks = originalSharedStringsXml.match(/<si\b[\s\S]*?<\/si>/g) ?? [];
+  if (siBlocks.length === 0) {
+    return { worksheetXml: croppedWorksheetXml, sharedStringsXml: originalSharedStringsXml };
+  }
+
+  // 2) Recolectar indices referenciados desde celdas con t="s".
+  const referencedIndices = new Set<number>();
+  const cellRegex = /<c\b([^>/]*)>([\s\S]*?)<\/c>/g;
+  for (const match of croppedWorksheetXml.matchAll(cellRegex)) {
+    const attrs = match[1] ?? "";
+    if (!/\bt="s"/.test(attrs)) continue;
+    const valueMatch = match[2]?.match(/<v>([^<]*)<\/v>/);
+    if (!valueMatch?.[1]) continue;
+    const index = Number(valueMatch[1]);
+    if (Number.isInteger(index) && index >= 0 && index < siBlocks.length) {
+      referencedIndices.add(index);
+    }
+  }
+
+  // 3) Remap antiguo->nuevo, conservando orden ascendente para que el archivo
+  //    sea estable y diffeable.
+  const orderedIndices = [...referencedIndices].sort((a, b) => a - b);
+  const indexMap = new Map<number, number>();
+  orderedIndices.forEach((oldIdx, newIdx) => indexMap.set(oldIdx, newIdx));
+
+  // 4) Reescribir <v> de las celdas string con el nuevo indice.
+  const remappedWorksheetXml = croppedWorksheetXml.replace(
+    /<c\b([^>/]*)>([\s\S]*?)<\/c>/g,
+    (whole, attrs: string, inner: string) => {
+      if (!/\bt="s"/.test(attrs)) return whole;
+      return `<c${attrs}>${inner.replace(/<v>([^<]*)<\/v>/, (_m, raw: string) => {
+        const oldIdx = Number(raw);
+        const newIdx = indexMap.get(oldIdx);
+        return newIdx === undefined ? `<v>${raw}</v>` : `<v>${newIdx}</v>`;
+      })}</c>`;
+    },
+  );
+
+  // 5) Reconstruir el <sst> manteniendo el atributo xmlns del original.
+  const sstOpenMatch = originalSharedStringsXml.match(/<sst\b[^>]*>/);
+  const xmlnsMatch = sstOpenMatch?.[0].match(/xmlns="[^"]+"/);
+  const xmlns = xmlnsMatch?.[0] ?? 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+  const keptSiBlocks = orderedIndices.map((idx) => siBlocks[idx] ?? "").join("");
+  const total = orderedIndices.length;
+  const rebuiltSharedStrings = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<sst ${xmlns} count="${total}" uniqueCount="${total}">${keptSiBlocks}</sst>`;
+
+  return { worksheetXml: remappedWorksheetXml, sharedStringsXml: rebuiltSharedStrings };
 }
 
 function cropWorksheetXmlByRanges(worksheetXml: string, ranges: Array<{ start: number; end: number }>) {
