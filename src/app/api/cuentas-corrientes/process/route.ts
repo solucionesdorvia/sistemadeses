@@ -6,6 +6,10 @@ import { createClient } from "@/lib/supabase/server";
 import { pathSafeVendorName } from "@/lib/vendors/pathSafeVendorName";
 
 export const runtime = "nodejs";
+// Procesar 30+ vendedores + escribir XLSX a Storage puede tomar mas de
+// los 30s default. Sin esto, el handler se corta a mitad y los `files`
+// quedan en estado "pending" sin completar.
+export const maxDuration = 300;
 
 type Body = {
   companyType: "americana" | "days" | "desesplast";
@@ -31,13 +35,6 @@ export async function POST(request: Request) {
     const processedVendors = new Set<string>();
     const processedSafeFolders = new Set<string>();
     const vendorIdentityMap = await loadExistingVendorIdentityMap(admin, user.id);
-
-    // Snapshot de los archivos previos de este companyType ANTES de
-    // procesar. Sirve para limpiar al final: PDFs viejos (siempre, hay
-    // que regenerarlos) y XLSX huerfanos (vendedor que ya no esta en
-    // el nuevo upload). Si el procesamiento falla y no genera ningun
-    // vendedor, no borramos nada — evita dejar la UI en cero.
-    const previousFiles = await listPreviousCompanyResults(admin, user.id, body.companyType);
 
     for (const filePath of body.filePaths) {
       const fileRow = await admin
@@ -136,27 +133,36 @@ export async function POST(request: Request) {
       }
     }
 
-    // Limpieza post-procesamiento. Solo si el lote dejo al menos 1
-    // vendedor procesado — asi un upload roto no borra todo.
+    // Limpieza post-procesamiento. La hacemos DESPUES de haber marcado
+    // todos los files como completed: si la limpieza tarda o falla, los
+    // archivos del usuario ya estan al dia. Solo limpiamos si se proceso
+    // al menos un vendedor (un upload roto no borra nada).
     if (processedSafeFolders.size > 0) {
-      const pathsToRemove: string[] = [];
-      for (const prev of previousFiles) {
-        const isPdf = prev.path.endsWith(".pdf");
-        // PDFs viejos: siempre borrar (los nuevos los regenera convert-pdf).
-        if (isPdf) {
-          pathsToRemove.push(prev.path);
-          continue;
+      try {
+        const previousFiles = await listPreviousCompanyResults(
+          admin,
+          user.id,
+          body.companyType,
+        );
+        const pathsToRemove: string[] = [];
+        for (const prev of previousFiles) {
+          const isPdf = prev.path.endsWith(".pdf");
+          if (isPdf) {
+            pathsToRemove.push(prev.path);
+            continue;
+          }
+          if (!processedSafeFolders.has(prev.safeFolder)) {
+            pathsToRemove.push(prev.path);
+          }
         }
-        // XLSX huerfanos: vendedor que ya no esta en la foto nueva.
-        if (!processedSafeFolders.has(prev.safeFolder)) {
-          pathsToRemove.push(prev.path);
+        if (pathsToRemove.length > 0) {
+          const chunkSize = 200;
+          for (let i = 0; i < pathsToRemove.length; i += chunkSize) {
+            await admin.storage.from("results").remove(pathsToRemove.slice(i, i + chunkSize));
+          }
         }
-      }
-      if (pathsToRemove.length > 0) {
-        const chunkSize = 200;
-        for (let i = 0; i < pathsToRemove.length; i += chunkSize) {
-          await admin.storage.from("results").remove(pathsToRemove.slice(i, i + chunkSize));
-        }
+      } catch (cleanupErr) {
+        console.error("[process] limpieza post-procesamiento fallo (no critico):", cleanupErr);
       }
     }
 
@@ -545,22 +551,33 @@ async function listPreviousCompanyResults(
 
   const xlsxSuffix = `_${companyType}.xlsx`;
   const pdfSuffix = `_${companyType}.pdf`;
-  const collected: Array<{ path: string; safeFolder: string }> = [];
+  const validFolders = vendorFolders.data.filter((f) => Boolean(f.name));
 
-  for (const folder of vendorFolders.data) {
-    if (!folder.name) continue;
-    const folderPath = `${vendorsRoot}/${folder.name}`;
-    const files = await admin.storage.from("results").list(folderPath, { limit: 1000 });
-    if (files.error || !files.data) continue;
-    for (const file of files.data) {
-      if (!file.name) continue;
-      if (file.name.endsWith(xlsxSuffix) || file.name.endsWith(pdfSuffix)) {
-        collected.push({
-          path: `${folderPath}/${file.name}`,
-          safeFolder: folder.name,
-        });
-      }
-    }
+  // Paralelizar en tandas de 10 — con 35+ vendedores la version secuencial
+  // tarda lo suficiente como para que se acumule timeout en el handler.
+  const collected: Array<{ path: string; safeFolder: string }> = [];
+  const concurrency = 10;
+  for (let i = 0; i < validFolders.length; i += concurrency) {
+    const chunk = validFolders.slice(i, i + concurrency);
+    const results = await Promise.all(
+      chunk.map(async (folder) => {
+        const folderPath = `${vendorsRoot}/${folder.name}`;
+        const files = await admin.storage.from("results").list(folderPath, { limit: 1000 });
+        if (files.error || !files.data) return [] as Array<{ path: string; safeFolder: string }>;
+        const matches: Array<{ path: string; safeFolder: string }> = [];
+        for (const file of files.data) {
+          if (!file.name) continue;
+          if (file.name.endsWith(xlsxSuffix) || file.name.endsWith(pdfSuffix)) {
+            matches.push({
+              path: `${folderPath}/${file.name}`,
+              safeFolder: folder.name,
+            });
+          }
+        }
+        return matches;
+      }),
+    );
+    for (const matches of results) collected.push(...matches);
   }
 
   return collected;

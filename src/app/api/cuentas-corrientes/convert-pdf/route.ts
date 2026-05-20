@@ -6,6 +6,9 @@ import { createClient } from "@/lib/supabase/server";
 import { pathSafeVendorName } from "@/lib/vendors/pathSafeVendorName";
 
 export const runtime = "nodejs";
+// LibreOffice tarda ~2-5s por XLSX. Con 30+ vendedores y reintentos
+// internos puede pasar el limite default y dejar conversiones a mitad.
+export const maxDuration = 300;
 
 type Body = {
   companyType?: "americana" | "days" | "desesplast";
