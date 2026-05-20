@@ -213,19 +213,23 @@ export async function xlsxToPdfFallback(
       const sum = widths.reduce((a, b) => a + b, 0);
       return { widths, sum };
     };
-    let size = 9;
-    let colWidths: number[];
-    let fit = computeFit(size);
-    while (fit.sum > contentW && size > 6) {
-      size -= 0.5;
-      fit = computeFit(size);
+    // Buscar el size mas grande que entra (entre 7 y 12). Probamos hacia
+    // arriba mientras quepa para que el texto sea bien legible.
+    let size = 7;
+    for (let s = 12; s >= 7; s -= 0.5) {
+      if (computeFit(s).sum <= contentW) {
+        size = s;
+        break;
+      }
     }
+    let colWidths: number[];
+    const fit = computeFit(size);
     if (fit.sum <= contentW) {
       // Entra holgado: escalar al ancho disponible para que use toda la pagina.
       const factor = contentW / fit.sum;
       colWidths = fit.widths.map((w) => w * factor);
     } else {
-      // Ni con 6pt entra: escalar proporcionalmente y aceptar algo de truncado.
+      // Ni con 7pt entra: escalar proporcionalmente y aceptar algo de truncado.
       colWidths = fit.widths.map((w) => (w / fit.sum) * contentW);
     }
 
@@ -242,8 +246,8 @@ export async function xlsxToPdfFallback(
     }
 
     const avgColW = contentW / Math.max(1, gridCols.length);
-    const ROW_H = size * 1.6;
-    const GAP_BEFORE_HEADER = size * 0.7;
+    const ROW_H = size * 1.9;
+    const GAP_BEFORE_HEADER = size * 0.8;
     const rowCount = renderRows.length;
 
     const TEXT_COL = rgb(0, 0, 0);
