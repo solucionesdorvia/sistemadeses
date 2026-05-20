@@ -224,8 +224,6 @@ export async function xlsxToPdfFallback(
     const rowsPerPage = Math.max(1, Math.floor(rowAreaH / ROW_H));
     const rowCount = rowSpans.length;
 
-    const WHITE = rgb(1, 1, 1);
-    const CELL_BORDER = rgb(0.72, 0.72, 0.72);
     const TEXT_COL = rgb(0, 0, 0);
 
     // Helper: ancho cubierto por un span que arranca en startCol y termina
@@ -266,21 +264,6 @@ export async function xlsxToPdfFallback(
         const rowBottom = startY - (localIdx + 1) * ROW_H;
         const textY = rowBottom + ROW_H * 0.3;
         const isHeaderRow = ri === headerRowIdx;
-
-        // Bordes de grilla en TODAS las cols de la fila (para que sea
-        // visible aunque la celda este vacia).
-        for (let i = 0; i < gridCols.length; i += 1) {
-          const xCell = MARGIN + (colXOffset.get(gridCols[i]!) ?? 0);
-          page.drawRectangle({
-            x: xCell,
-            y: rowBottom,
-            width: colWidths[i]!,
-            height: ROW_H,
-            color: WHITE,
-            borderColor: CELL_BORDER,
-            borderWidth: 0.35,
-          });
-        }
 
         for (const sp of rowSpans[ri]!) {
           if (!sp.text.trim()) continue;
