@@ -79,12 +79,15 @@ export async function convertXlsxToPdfWithLibreOffice(
     _JAVA_OPTIONS: "",
   };
 
+  // OJO: NO usar --nojava. LibreOffice 7.4+ removio ese flag y aborta con
+  // "Error in option: --nojava" antes de leer el archivo. Java se
+  // deshabilita igual via SAL_NO_JAVA=1, JAVA_HOME a path invalido y el
+  // perfil registrymodifications.xcu (ver loEnv y loUserDir arriba).
   const argsFor = (filter: string) => [
     "--headless",
     "--norestore",
     "--nologo",
     "--nofirststartwizard",
-    "--nojava",
     `-env:UserInstallation=${userInstallation}`,
     "--convert-to",
     filter,
