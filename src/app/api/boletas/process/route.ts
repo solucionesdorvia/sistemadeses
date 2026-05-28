@@ -4,6 +4,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
+// PDFs grandes con regex pueden tomar tiempo. Sin maxDuration, Next.js
+// corta a 30s default y el handler se interrumpe a la mitad.
+export const maxDuration = 300;
 
 type Body = { filePaths: string[] };
 
@@ -27,6 +30,7 @@ export async function POST(request: Request) {
     if (!user) return Response.json({ message: "Sesion invalida." }, { status: 401 });
 
     for (const filePath of body.filePaths) {
+      const fileStart = Date.now();
       const fileResult = await admin
         .from("files")
         .select("id,user_id,original_filename")
@@ -43,7 +47,11 @@ export async function POST(request: Request) {
         }
 
         const pdfBytes = new Uint8Array(await downloaded.data.arrayBuffer());
+        const extractStart = Date.now();
         const vendorNumber = extractVendorFromPdf(pdfBytes);
+        console.log(
+          `[boletas] file=${fileResult.data.original_filename} pdfBytes=${pdfBytes.length} extractMs=${Date.now() - extractStart} vendor=${vendorNumber}`,
+        );
 
         let vendorId: string | null = null;
         if (vendorNumber) {
@@ -85,7 +93,12 @@ export async function POST(request: Request) {
         });
 
         await admin.from("files").update({ status: "completed" }).eq("id", fileResult.data.id);
+        console.log(`[boletas] file=${fileResult.data.original_filename} totalMs=${Date.now() - fileStart}`);
       } catch (error) {
+        console.error(
+          `[boletas] file=${fileResult.data.original_filename} FALLO totalMs=${Date.now() - fileStart}:`,
+          error,
+        );
         await admin
           .from("files")
           .update({
@@ -106,27 +119,33 @@ export async function POST(request: Request) {
 }
 
 function extractVendorFromPdf(pdfBytes: Uint8Array): string | null {
-  const rawText = Buffer.from(pdfBytes).toString("latin1");
+  // Limite duro de bytes para evitar catastrophic backtracking en PDFs
+  // grandes/raros. Para detectar vendedor alcanza con la primera pagina.
+  const MAX_BYTES = 2_000_000;
+  const trimmed = pdfBytes.length > MAX_BYTES ? pdfBytes.subarray(0, MAX_BYTES) : pdfBytes;
+  const rawText = Buffer.from(trimmed).toString("latin1");
 
   const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
   let streamMatch: RegExpExecArray | null;
   let scanned = 0;
 
-  while ((streamMatch = streamRegex.exec(rawText)) !== null && scanned < 30) {
+  while ((streamMatch = streamRegex.exec(rawText)) !== null && scanned < 15) {
     scanned++;
     const compressed = Buffer.from(streamMatch[1], "latin1");
     if (compressed.length < 10) continue;
+    // Limitar tambien el tamaño del stream individual.
+    const cappedCompressed = compressed.length > 500_000 ? compressed.subarray(0, 500_000) : compressed;
 
-    const inflated = tryInflate(compressed);
+    const inflated = tryInflate(cappedCompressed);
     if (!inflated) continue;
 
-    const streamText = inflated.toString("latin1");
+    const streamText = inflated.toString("latin1").slice(0, 500_000);
     const textFromOps = extractTextFromOperators(streamText);
     const found = matchVendor(textFromOps);
     if (found) return found;
   }
 
-  const rawOps = extractTextFromOperators(rawText);
+  const rawOps = extractTextFromOperators(rawText.slice(0, 500_000));
   const found = matchVendor(rawOps);
   if (found) return found;
 

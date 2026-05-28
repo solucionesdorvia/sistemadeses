@@ -18,7 +18,10 @@ export function BoletasUpload() {
   const mutation = useMutation({
     mutationFn: async () => {
       if (!files.length) throw new Error("Selecciona al menos un PDF.");
-      const batches = chunk(files, 3);
+      // 1 archivo por request: PDFs pesados con regex pueden tardar
+      // varios segundos cada uno, y un chunk grande corta la conexion
+      // del browser (HTTP 499 si excede ~13s).
+      const batches = chunk(files, 1);
       for (let i = 0; i < batches.length; i += 1) {
         await uploadBoletasFiles(batches[i]);
         setProgress(Math.round(((i + 1) / batches.length) * 100));
