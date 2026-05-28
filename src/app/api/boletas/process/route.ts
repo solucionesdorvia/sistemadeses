@@ -172,30 +172,63 @@ function matchVendor(text: string): string | null {
 }
 
 function extractTextFromOperators(text: string): string {
+  // Caminamos el string una sola vez y agarramos contenido entre `(` y `)`
+  // tratando `\(`/`\)`/`\\` como escapados. Lineal, sin backtracking.
+  // Antes usabamos regex como `/\(([^()]*(?:\\.[^()]*)*)\)\s*Tj/g` que en
+  // PDFs con muchos parentesis disparaban catastrophic backtracking
+  // (vimos un PDF que tardo 3min 34s en este endpoint).
   const lines: string[] = [];
-
-  const tjArray = new RegExp("\\[(.*?)\\]\\s*TJ", "gs");
-  let m: RegExpExecArray | null;
-  let count = 0;
-  while ((m = tjArray.exec(text)) !== null && count < 5000) {
-    count++;
-    const tokenRe = /\(([^()]*(?:\\.[^()]*)*)\)/g;
-    let t: RegExpExecArray | null;
-    let line = "";
-    while ((t = tokenRe.exec(m[1])) !== null) {
-      line += unescapePdf(t[1]);
+  const len = text.length;
+  let i = 0;
+  let collected = 0;
+  const MAX_TOKENS = 20_000;
+  while (i < len && collected < MAX_TOKENS) {
+    const ch = text.charCodeAt(i);
+    if (ch !== 40 /* ( */) {
+      i++;
+      continue;
     }
-    if (line.trim()) lines.push(line);
+    // Saltar contenido entre parentesis, respetando escapes \( \) \\.
+    let j = i + 1;
+    let depth = 1;
+    const start = j;
+    while (j < len) {
+      const c = text.charCodeAt(j);
+      if (c === 92 /* \ */) {
+        j += 2; // saltar caracter escapado
+        continue;
+      }
+      if (c === 40) {
+        depth++;
+        j++;
+        continue;
+      }
+      if (c === 41 /* ) */) {
+        depth--;
+        if (depth === 0) break;
+        j++;
+        continue;
+      }
+      j++;
+    }
+    if (depth !== 0) {
+      // sin cierre — abortar y avanzar
+      i++;
+      continue;
+    }
+    const inner = text.slice(start, j);
+    // Solo guardamos tokens que probablemente sean texto Tj/TJ:
+    // miramos los siguientes ~50 chars y buscamos "Tj" o "TJ".
+    const lookahead = text.slice(j + 1, j + 60);
+    if (/^\s*\]?\s*(?:Tj|TJ)/.test(lookahead) || /\)\s*(?:Tj|TJ)/.test(lookahead)) {
+      const decoded = unescapePdf(inner);
+      if (decoded.trim()) {
+        lines.push(decoded);
+        collected++;
+      }
+    }
+    i = j + 1;
   }
-
-  const tjSingle = /\(([^()]*(?:\\.[^()]*)*)\)\s*Tj/g;
-  count = 0;
-  while ((m = tjSingle.exec(text)) !== null && count < 5000) {
-    count++;
-    const decoded = unescapePdf(m[1]);
-    if (decoded.trim()) lines.push(decoded);
-  }
-
   return lines.join(" ");
 }
 
