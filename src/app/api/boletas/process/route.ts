@@ -1,10 +1,8 @@
-import { inflateSync, inflateRawSync } from "node:zlib";
-
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
-// PDFs grandes con regex pueden tomar tiempo. Sin maxDuration, Next.js
+// PDFs grandes con pdfjs pueden tomar tiempo. Sin maxDuration, Next.js
 // corta a 30s default y el handler se interrumpe a la mitad.
 export const maxDuration = 300;
 
@@ -48,7 +46,7 @@ export async function POST(request: Request) {
 
         const pdfBytes = new Uint8Array(await downloaded.data.arrayBuffer());
         const extractStart = Date.now();
-        const vendorNumber = extractVendorFromPdf(pdfBytes);
+        const vendorNumber = await extractVendorFromPdf(pdfBytes);
         console.log(
           `[boletas] file=${fileResult.data.original_filename} pdfBytes=${pdfBytes.length} extractMs=${Date.now() - extractStart} vendor=${vendorNumber}`,
         );
@@ -118,49 +116,38 @@ export async function POST(request: Request) {
   }
 }
 
-function extractVendorFromPdf(pdfBytes: Uint8Array): string | null {
-  // Limite duro de bytes para evitar catastrophic backtracking en PDFs
-  // grandes/raros. Para detectar vendedor alcanza con la primera pagina.
-  const MAX_BYTES = 2_000_000;
-  const trimmed = pdfBytes.length > MAX_BYTES ? pdfBytes.subarray(0, MAX_BYTES) : pdfBytes;
-  const rawText = Buffer.from(trimmed).toString("latin1");
-
-  const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
-  let streamMatch: RegExpExecArray | null;
-  let scanned = 0;
-
-  while ((streamMatch = streamRegex.exec(rawText)) !== null && scanned < 15) {
-    scanned++;
-    const compressed = Buffer.from(streamMatch[1], "latin1");
-    if (compressed.length < 10) continue;
-    // Limitar tambien el tamaño del stream individual.
-    const cappedCompressed = compressed.length > 500_000 ? compressed.subarray(0, 500_000) : compressed;
-
-    const inflated = tryInflate(cappedCompressed);
-    if (!inflated) continue;
-
-    const streamText = inflated.toString("latin1").slice(0, 500_000);
-    const textFromOps = extractTextFromOperators(streamText);
-    const found = matchVendor(textFromOps);
-    if (found) return found;
+async function extractVendorFromPdf(pdfBytes: Uint8Array): Promise<string | null> {
+  // pdfjs-dist decodifica fuentes embebidas con encoding custom (lo que
+  // el regex no podia hacer). PDFs como las boletas de Desesplast tienen
+  // TrueType subseteadas: cada glifo es un codigo binario, no ASCII.
+  // pdfjs lee la tabla ToUnicode/CMap y devuelve el string real.
+  let allText = "";
+  try {
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore — paquete sin tipos en algunos casos
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const doc = await pdfjs.getDocument({
+      data: pdfBytes,
+      disableFontFace: true,
+      useSystemFonts: false,
+    }).promise;
+    // Solo escaneamos las primeras 3 paginas: el vendedor siempre aparece
+    // al inicio en la cabecera de la boleta.
+    const maxPages = Math.min(doc.numPages, 3);
+    for (let p = 1; p <= maxPages; p += 1) {
+      const page = await doc.getPage(p);
+      const content = await page.getTextContent();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const pageText = content.items.map((it: any) => it.str ?? "").join(" ");
+      allText += `${pageText}\n`;
+      const partial = matchVendor(allText);
+      if (partial) return partial;
+    }
+  } catch (e) {
+    console.error("[boletas] pdfjs fallo, no se pudo extraer texto:", e);
+    return null;
   }
-
-  const rawOps = extractTextFromOperators(rawText.slice(0, 500_000));
-  const found = matchVendor(rawOps);
-  if (found) return found;
-
-  const printable = rawText.replace(/[^\x20-\x7E]/g, " ").replace(/\s+/g, " ").slice(0, 50000);
-  return matchVendor(printable);
-}
-
-function tryInflate(compressed: Buffer): Buffer | null {
-  try {
-    return inflateSync(compressed);
-  } catch { /* not zlib */ }
-  try {
-    return inflateRawSync(compressed);
-  } catch { /* not raw deflate */ }
-  return null;
+  return matchVendor(allText);
 }
 
 function matchVendor(text: string): string | null {
@@ -169,76 +156,6 @@ function matchVendor(text: string): string | null {
     if (match?.[1]) return stripLeadingZeros(match[1]);
   }
   return null;
-}
-
-function extractTextFromOperators(text: string): string {
-  // Caminamos el string una sola vez y agarramos contenido entre `(` y `)`
-  // tratando `\(`/`\)`/`\\` como escapados. Lineal, sin backtracking.
-  // Antes usabamos regex como `/\(([^()]*(?:\\.[^()]*)*)\)\s*Tj/g` que en
-  // PDFs con muchos parentesis disparaban catastrophic backtracking
-  // (vimos un PDF que tardo 3min 34s en este endpoint).
-  const lines: string[] = [];
-  const len = text.length;
-  let i = 0;
-  let collected = 0;
-  const MAX_TOKENS = 20_000;
-  while (i < len && collected < MAX_TOKENS) {
-    const ch = text.charCodeAt(i);
-    if (ch !== 40 /* ( */) {
-      i++;
-      continue;
-    }
-    // Saltar contenido entre parentesis, respetando escapes \( \) \\.
-    let j = i + 1;
-    let depth = 1;
-    const start = j;
-    while (j < len) {
-      const c = text.charCodeAt(j);
-      if (c === 92 /* \ */) {
-        j += 2; // saltar caracter escapado
-        continue;
-      }
-      if (c === 40) {
-        depth++;
-        j++;
-        continue;
-      }
-      if (c === 41 /* ) */) {
-        depth--;
-        if (depth === 0) break;
-        j++;
-        continue;
-      }
-      j++;
-    }
-    if (depth !== 0) {
-      // sin cierre — abortar y avanzar
-      i++;
-      continue;
-    }
-    const inner = text.slice(start, j);
-    // Solo guardamos tokens que probablemente sean texto Tj/TJ:
-    // miramos los siguientes ~50 chars y buscamos "Tj" o "TJ".
-    const lookahead = text.slice(j + 1, j + 60);
-    if (/^\s*\]?\s*(?:Tj|TJ)/.test(lookahead) || /\)\s*(?:Tj|TJ)/.test(lookahead)) {
-      const decoded = unescapePdf(inner);
-      if (decoded.trim()) {
-        lines.push(decoded);
-        collected++;
-      }
-    }
-    i = j + 1;
-  }
-  return lines.join(" ");
-}
-
-function unescapePdf(value: string): string {
-  return value
-    .replace(/\\([nrtbf()\\])/g, "$1")
-    .replace(/\\([0-7]{1,3})/g, (_, oct: string) => {
-      const code = Number.parseInt(oct, 8);
-      return Number.isNaN(code) ? "" : String.fromCharCode(code);
-    });
 }
 
 function normalizeVendorNumber(value: string | null): string | null {
