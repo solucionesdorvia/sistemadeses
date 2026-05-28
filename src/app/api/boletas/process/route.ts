@@ -1,3 +1,7 @@
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore — paquete sin tipos publicos en este path
+import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
+
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -123,28 +127,30 @@ async function extractVendorFromPdf(pdfBytes: Uint8Array): Promise<string | null
   // pdfjs lee la tabla ToUnicode/CMap y devuelve el string real.
   let allText = "";
   try {
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore — paquete sin tipos en algunos casos
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
     const doc = await pdfjs.getDocument({
       data: pdfBytes,
       disableFontFace: true,
       useSystemFonts: false,
     }).promise;
-    // Solo escaneamos las primeras 3 paginas: el vendedor siempre aparece
-    // al inicio en la cabecera de la boleta.
     const maxPages = Math.min(doc.numPages, 3);
+    console.log(`[boletas-pdfjs] doc abierto numPages=${doc.numPages} scan=${maxPages}`);
     for (let p = 1; p <= maxPages; p += 1) {
       const page = await doc.getPage(p);
       const content = await page.getTextContent();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const pageText = content.items.map((it: any) => it.str ?? "").join(" ");
       allText += `${pageText}\n`;
+      console.log(`[boletas-pdfjs] pagina ${p}: items=${content.items.length} chars=${pageText.length}`);
       const partial = matchVendor(allText);
-      if (partial) return partial;
+      if (partial) {
+        console.log(`[boletas-pdfjs] vendor matcheado en pagina ${p}: ${partial}`);
+        return partial;
+      }
     }
+    // Si no matcheo, loggear sample para diagnostico.
+    console.log(`[boletas-pdfjs] sin match. sample=${JSON.stringify(allText.slice(0, 500))}`);
   } catch (e) {
-    console.error("[boletas] pdfjs fallo, no se pudo extraer texto:", e);
+    console.error("[boletas-pdfjs] FALLO:", e instanceof Error ? `${e.name}: ${e.message}` : e);
     return null;
   }
   return matchVendor(allText);
