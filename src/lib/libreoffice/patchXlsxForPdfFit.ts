@@ -3,11 +3,14 @@ import { Buffer } from "node:buffer";
 import JSZip from "jszip";
 
 /**
- * Atributos OOXML que fuerzan: apaisado, A3, 1 página de ancho, alto libre.
- * Nota: `fitToHeight="0"` significa “no limitar alto”.
+ * Atributos OOXML que fuerzan: A4 vertical, 1 página de ancho, alto libre.
+ * Vertical para que las capturas de pantalla desde el celular entren
+ * completas a lo ancho. LibreOffice ESCALA el contenido a ese ancho
+ * (fitToWidth=1), así que nada se trunca ni se superpone: todo se achica
+ * proporcionalmente. `fitToHeight="0"` = sin límite de alto (más páginas).
  */
 const PAGE_SETUP_ATTRS =
-  'paperSize="8" orientation="landscape" fitToWidth="1" fitToHeight="0" usePrinterDefaults="0"';
+  'paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="0" usePrinterDefaults="0"';
 
 /** Decora los sheet*.xml y workbook.xml para que Calc/LO ajuste ancho al imprimir. */
 export async function patchXlsxForPdfFit(xlsx: Uint8Array): Promise<Buffer> {

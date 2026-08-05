@@ -27,13 +27,14 @@ export async function minimalPdfError(message: string): Promise<Buffer> {
   return Buffer.from(await pdf.save({ useObjectStreams: false }));
 }
 
-/** A4 apaisada (pt) — para páginas de error y hojas angostas */
-/** A4 apaisado (pt) — mismo formato que el PDF que genera LibreOffice
- *  para days. Entra holgado el renglon completo de cuenta corriente sin
- *  truncar columnas. Si el contenido excede una pagina, se agregan mas. */
-const PAGE_W = 842.07;
-const PAGE_H = 595.28;
-const MARGIN = 36;
+/** A4 vertical (pt) — igual que el PDF de LibreOffice (portrait +
+ *  fitToWidth). Vertical para que las capturas desde el celular entren
+ *  completas a lo ancho. El auto-fit de tamaño de letra (12 -> 7 pt)
+ *  achica el texto hasta que el renglon completo entre sin truncar.
+ *  Si el contenido excede una pagina, se agregan mas. */
+const PAGE_W = 595.28;
+const PAGE_H = 841.89;
+const MARGIN = 30;
 
 function truncateCell(s: string, max: number): string {
   const t = String(s).replace(/\r\n/g, " ").replace(/\s+/g, " ").trim();
@@ -193,30 +194,41 @@ export async function xlsxToPdfFallback(
     // Ancho por columna: para cada col, calcular el ancho real necesario
     // segun el texto mas largo que aparece ahi. Si la suma entra en la
     // pagina, usar ese ancho. Si no, ir reduciendo el size hasta que
-    // entre (entre 6 y 9pt). Asi los importes "$ 2,743,923.00" entran
-    // completos y "001 CUENTA CORRIENTE" no se trunca a "CORRIE...".
-    const colMaxLen = new Map<number, number>();
+    // entre. Asi los importes "$ 2,743,923.00" entran completos y
+    // "001 CUENTA CORRIENTE" no se trunca a "CORRIE...".
+    // Ancho REAL del texto medido con la fuente (por punto de tamano), no
+    // estimado por cantidad de caracteres: "001 CUENTA CORRIENTE" en
+    // mayusculas es mas ancho que 20 chars promedio y con la estimacion
+    // se comia el padding (el "$" de la col siguiente quedaba pegado).
+    const measureUnitWidth = (text: string) => {
+      try {
+        return fontBold.widthOfTextAtSize(text, 1);
+      } catch {
+        return text.length * 0.55;
+      }
+    };
+    const colMaxUnitW = new Map<number, number>();
     for (const spans of renderRows) {
       for (const sp of spans) {
-        const prev = colMaxLen.get(sp.startCol) ?? 0;
-        colMaxLen.set(sp.startCol, Math.max(prev, sp.text.length));
+        const prev = colMaxUnitW.get(sp.startCol) ?? 0;
+        colMaxUnitW.set(sp.startCol, Math.max(prev, measureUnitWidth(sp.text)));
       }
     }
-    const lens = gridCols.map((g) => Math.max(colMaxLen.get(g) ?? 0, 3));
-    // Padding por celda (margen izq+der dentro de la col). Lo bastante
-    // grande para que un span termine antes del proximo (sino "CORRIENTE"
-    // queda pegado al "$" del importe que viene en la col siguiente).
-    const CELL_PAD = 12;
+    const unitWidths = gridCols.map((g) => Math.max(colMaxUnitW.get(g) ?? 0, 1.5));
+    // Padding por celda proporcional al tamano de letra: separa un span
+    // del siguiente (sino "CORRIENTE" queda pegado al "$" del importe).
+    const padFor = (s: number) => Math.max(5, s * 0.9);
     const computeFit = (s: number) => {
-      const charW = s * 0.55;
-      const widths = lens.map((l) => l * charW + CELL_PAD);
+      const pad = padFor(s);
+      const widths = unitWidths.map((u) => u * s + pad);
       const sum = widths.reduce((a, b) => a + b, 0);
       return { widths, sum };
     };
-    // Buscar el size mas grande que entra (entre 7 y 12). Probamos hacia
-    // arriba mientras quepa para que el texto sea bien legible.
-    let size = 7;
-    for (let s = 12; s >= 7; s -= 0.5) {
+    // Buscar el size mas grande que entra (entre 5 y 12). En A4 vertical
+    // los renglones largos de cuenta corriente necesitan bajar hasta
+    // ~6pt: preferimos letra chica antes que truncar importes con "…".
+    let size = 5;
+    for (let s = 12; s >= 5; s -= 0.5) {
       if (computeFit(s).sum <= contentW) {
         size = s;
         break;
@@ -229,7 +241,7 @@ export async function xlsxToPdfFallback(
       const factor = contentW / fit.sum;
       colWidths = fit.widths.map((w) => w * factor);
     } else {
-      // Ni con 7pt entra: escalar proporcionalmente y aceptar algo de truncado.
+      // Ni con 5pt entra: escalar proporcionalmente (ultimo recurso).
       colWidths = fit.widths.map((w) => (w / fit.sum) * contentW);
     }
 
