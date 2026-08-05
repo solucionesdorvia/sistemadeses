@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import * as XLSX from "xlsx";
 
+import { convertXlsxToPdf } from "@/lib/libreoffice/convertXlsxToPdf";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { pathSafeVendorName } from "@/lib/vendors/pathSafeVendorName";
@@ -34,6 +35,8 @@ export async function POST(request: Request) {
 
     const processedVendors = new Set<string>();
     const processedSafeFolders = new Set<string>();
+    // vendedor -> path del xlsx generado (para la conversion a PDF al final).
+    const processedOutputs = new Map<string, string>();
     const vendorIdentityMap = await loadExistingVendorIdentityMap(admin, user.id);
 
     for (const filePath of body.filePaths) {
@@ -119,6 +122,7 @@ export async function POST(request: Request) {
 
           processedVendors.add(canonicalNormalized);
           processedSafeFolders.add(safeName);
+          processedOutputs.set(canonicalNormalized, outputPath);
           vendorsFoundCount += 1;
         }
 
@@ -166,7 +170,62 @@ export async function POST(request: Request) {
       }
     }
 
-    return Response.json({ ok: true, processedVendors: Array.from(processedVendors) });
+    // Conversion a PDF SERVER-SIDE, dentro de este mismo request. Antes la
+    // disparaba el navegador con un fetch por vendedor: si el usuario
+    // cerraba o navegaba durante el procesamiento, esos fetchs morian en
+    // silencio y los PDFs nunca se generaban. El server en cambio termina
+    // su trabajo aunque el cliente se desconecte (visto en logs: requests
+    // con HTTP 499 completaron igual la conversion).
+    let pdfConverted = 0;
+    let pdfCandidates = 0;
+    const pdfErrors: Array<{ vendor: string; reason: string }> = [];
+    if (processedOutputs.size > 0) {
+      const flagged = await admin
+        .from("vendors")
+        .select("normalized_name")
+        .eq("user_id", user.id)
+        .eq("convert_to_pdf", true);
+      const flaggedSet = new Set(
+        (flagged.data ?? []).map((v) => String(v.normalized_name).toLowerCase()),
+      );
+      for (const [vendorName, xlsxPath] of processedOutputs) {
+        if (!flaggedSet.has(vendorName.toLowerCase())) continue;
+        pdfCandidates += 1;
+        try {
+          const downloaded = await admin.storage.from("results").download(xlsxPath);
+          if (downloaded.error || !downloaded.data) {
+            throw new Error(downloaded.error?.message ?? "No se pudo descargar XLSX.");
+          }
+          const pdfBytes = await convertXlsxToPdf(
+            new Uint8Array(await downloaded.data.arrayBuffer()),
+            xlsxPath.split("/").pop() ?? "in.xlsx",
+          );
+          const pdfPath = xlsxPath.replace(/\.xlsx$/i, ".pdf");
+          const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {
+            upsert: true,
+            contentType: "application/pdf",
+          });
+          if (uploaded.error) throw new Error(uploaded.error.message);
+          pdfConverted += 1;
+          console.log(`[process-pdf] vendor=${vendorName} OK (${pdfBytes.length} bytes)`);
+        } catch (pdfErr) {
+          const reason = pdfErr instanceof Error ? pdfErr.message : "Error al convertir.";
+          console.error(`[process-pdf] vendor=${vendorName} FALLO:`, reason);
+          pdfErrors.push({ vendor: vendorName, reason });
+        }
+      }
+      console.log(
+        `[process-pdf] fin vendedores=${processedOutputs.size} conFlagPdf=${pdfCandidates} convertidos=${pdfConverted} errores=${pdfErrors.length}`,
+      );
+    }
+
+    return Response.json({
+      ok: true,
+      processedVendors: Array.from(processedVendors),
+      pdfConverted,
+      pdfCandidates,
+      pdfErrors,
+    });
   } catch (error) {
     return Response.json(
       { message: error instanceof Error ? error.message : "Error al procesar cuentas corrientes." },

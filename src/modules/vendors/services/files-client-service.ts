@@ -50,71 +50,51 @@ export async function uploadCuentaCorrienteFiles(
       uploadedPaths.push(path);
     }
 
-    const processResponse = await fetch("/api/cuentas-corrientes/process", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ companyType, filePaths: uploadedPaths }),
-    });
+    // El server procesa los xlsx Y genera los PDFs (vendedores con
+    // convert_to_pdf=true) dentro de este mismo request. Aunque el
+    // usuario navegue o cierre la pestana, el server termina igual y
+    // los archivos aparecen en resultados.
+    const progressToast = toast.loading("Procesando Excel y generando PDFs...");
+    let processResponse: Response;
+    try {
+      processResponse = await fetch("/api/cuentas-corrientes/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companyType, filePaths: uploadedPaths }),
+      });
+    } finally {
+      toast.dismiss(progressToast);
+    }
     if (!processResponse.ok) {
       const payload = (await processResponse.json().catch(() => ({}))) as { message?: string };
       throw new Error(payload.message ?? "Error al procesar cuentas corrientes.");
     }
     const processData = (await processResponse.json().catch(() => ({}))) as {
       processedVendors?: string[];
+      pdfConverted?: number;
+      pdfCandidates?: number;
+      pdfErrors?: Array<{ vendor: string; reason: string }>;
     };
     const processedVendors = processData.processedVendors ?? [];
+    const pdfConverted = processData.pdfConverted ?? 0;
+    const pdfCandidates = processData.pdfCandidates ?? 0;
+    const pdfErrors = processData.pdfErrors ?? [];
 
-    // Filtrar a los vendedores marcados con convert_to_pdf=true.
-    const vendorsWithFlag = await supabase
-      .from("vendors")
-      .select("normalized_name")
-      .eq("convert_to_pdf", true);
-    const flaggedSet = new Set(
-      (vendorsWithFlag.data ?? []).map((v) => String(v.normalized_name).toLowerCase()),
-    );
-    const toConvert = processedVendors.filter((v) => flaggedSet.has(v.toLowerCase()));
-
-    if (toConvert.length === 0) {
-      toast.info(
-        `PDF: 0 generados (${processedVendors.length} vendedores procesados, ninguno con flag PDF activo).`,
-        { duration: 10_000 },
+    if (pdfErrors.length > 0) {
+      const first = pdfErrors[0];
+      toast.error(
+        `PDF: ${pdfConverted}/${pdfCandidates} generados. 1er error: ${first?.vendor} — ${first?.reason}`,
+        { duration: 12_000 },
+      );
+    } else if (pdfConverted > 0) {
+      toast.success(
+        `Listo: ${processedVendors.length} vendedores procesados, ${pdfConverted} PDF generados.`,
       );
     } else {
-      // Convertir 1 por 1 (en tandas de 3 paralelas) para que ninguna
-      // request tarde lo suficiente para que el browser la corte (HTTP 499).
-      let converted = 0;
-      const errors: string[] = [];
-      const progressToast = toast.loading(`PDF: 0/${toConvert.length}...`);
-      const concurrency = 3;
-      for (let i = 0; i < toConvert.length; i += concurrency) {
-        const chunk = toConvert.slice(i, i + concurrency);
-        const results = await Promise.allSettled(
-          chunk.map((v) => triggerPdfConversion({ companyType, vendorName: v })),
-        );
-        for (let j = 0; j < results.length; j += 1) {
-          const r = results[j];
-          const v = chunk[j]!;
-          if (r.status === "fulfilled" && r.value.ok && r.value.converted > 0) {
-            converted += 1;
-          } else if (r.status === "fulfilled" && r.value.errors.length > 0) {
-            errors.push(`${v}: ${r.value.errors[0]?.reason ?? "error"}`);
-          } else if (r.status === "rejected") {
-            errors.push(`${v}: ${r.reason instanceof Error ? r.reason.message : "error"}`);
-          } else {
-            errors.push(`${v}: sin pdf`);
-          }
-        }
-        toast.loading(`PDF: ${converted}/${toConvert.length}...`, { id: progressToast });
-      }
-      toast.dismiss(progressToast);
-      if (errors.length === 0) {
-        toast.success(`PDF: ${converted}/${toConvert.length} generado(s).`);
-      } else {
-        toast.error(
-          `PDF parcial: ${converted}/${toConvert.length}. 1er error: ${errors[0]}`,
-          { duration: 12_000 },
-        );
-      }
+      toast.info(
+        `Excel procesado (${processedVendors.length} vendedores). PDF: 0 generados — ningun vendedor del lote tiene 'PDF' activo en configuracion.`,
+        { duration: 10_000 },
+      );
     }
   } catch (error) {
     if (uploadedPaths.length > 0) {
