@@ -239,37 +239,24 @@ export async function convertXlsxToPdfWithLibreOffice(
 }
 
 /**
- * Prioridad: LibreOffice (1–2 forks como máx.). Si no hay o falla, PDF de
- * respaldo (pdf-lib) — no encadena mas procesos.
+ * Cuentas corrientes: SIEMPRE el render propio (pdf-lib).
+ *
+ * Los vendedores leen estos PDFs desde capturas de pantalla del celular.
+ * El render propio esta afinado para eso — letra 10pt y columnas
+ * compactas — mientras que LibreOffice reproduce el Excel tal cual, con
+ * sus columnas anchas, y termina en ~7.6pt con los datos separados.
+ * Ademas depende de que `soffice` este disponible y no falle, lo que
+ * hacia que el mismo lote saliera distinto segun el dia.
+ *
+ * `convertXlsxToPdfWithLibreOffice` queda exportada por si se necesita
+ * una copia fiel al Excel en otro flujo.
  */
 export async function convertXlsxToPdf(
   xlsx: Uint8Array,
   fileName: string,
 ): Promise<Buffer> {
   try {
-    const withFallback = async (errNote: string) => {
-      try {
-        return await xlsxToPdfFallback(xlsx, fileName, errNote);
-      } catch (e) {
-        const m = [errNote, e instanceof Error ? e.message : String(e)]
-          .filter(Boolean)
-          .join(" | ");
-        return minimalPdfError(m);
-      }
-    };
-
-    const lo = await getLibreOfficeCommand();
-    if (lo) {
-      try {
-        return await convertXlsxToPdfWithLibreOffice(xlsx, fileName);
-      } catch (err) {
-        const note = err instanceof Error ? err.message : String(err);
-        return withFallback(note);
-      }
-    }
-    return withFallback(
-      "LibreOffice (soffice) no esta en el PATH. PDF generado solo desde datos de la hoja.",
-    );
+    return await xlsxToPdfFallback(xlsx, fileName);
   } catch (e) {
     return minimalPdfError(e instanceof Error ? e.message : String(e));
   }
