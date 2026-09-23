@@ -238,25 +238,71 @@ export async function convertXlsxToPdfWithLibreOffice(
   }
 }
 
+type CompanyType = "americana" | "days" | "desesplast";
+
 /**
- * Cuentas corrientes: SIEMPRE el render propio (pdf-lib).
+ * Los XLSX por vendedor se guardan como `{vendedor}_{empresa}.xlsx`, asi
+ * que el nombre alcanza para saber de que empresa es cuando quien llama
+ * no lo pasa explicito (p. ej. el boton "Generar PDF" de un vendedor).
+ */
+function detectCompanyFromFileName(fileName: string): CompanyType | null {
+  const lower = fileName.toLowerCase();
+  if (lower.includes("_americana.")) return "americana";
+  if (lower.includes("_days.")) return "days";
+  if (lower.includes("_desesplast.")) return "desesplast";
+  return null;
+}
+
+/**
+ * Days y Desesplast: SIEMPRE el render propio (pdf-lib).
  *
- * Los vendedores leen estos PDFs desde capturas de pantalla del celular.
- * El render propio esta afinado para eso — letra 10pt y columnas
+ * Esos vendedores leen los PDF desde capturas de pantalla del celular y
+ * el render propio esta afinado para eso — letra 10pt y columnas
  * compactas — mientras que LibreOffice reproduce el Excel tal cual, con
  * sus columnas anchas, y termina en ~7.6pt con los datos separados.
- * Ademas depende de que `soffice` este disponible y no falle, lo que
- * hacia que el mismo lote saliera distinto segun el dia.
+ * Ademas no depende de que `soffice` ande, que hacia que el mismo lote
+ * saliera distinto segun el dia.
  *
- * `convertXlsxToPdfWithLibreOffice` queda exportada por si se necesita
- * una copia fiel al Excel en otro flujo.
+ * Americana queda con el comportamiento de siempre (LibreOffice primero,
+ * render propio solo si falla): su PDF es fiel al Excel y nadie pidio
+ * cambiarlo.
  */
 export async function convertXlsxToPdf(
   xlsx: Uint8Array,
   fileName: string,
+  companyType?: CompanyType,
 ): Promise<Buffer> {
+  const company = companyType ?? detectCompanyFromFileName(fileName);
+  const useOwnRenderer = company === "days" || company === "desesplast";
+
   try {
-    return await xlsxToPdfFallback(xlsx, fileName);
+    if (useOwnRenderer) {
+      return await xlsxToPdfFallback(xlsx, fileName);
+    }
+
+    // Americana (o empresa no identificada): LibreOffice primero.
+    const withFallback = async (errNote: string) => {
+      try {
+        return await xlsxToPdfFallback(xlsx, fileName, errNote);
+      } catch (e) {
+        const m = [errNote, e instanceof Error ? e.message : String(e)]
+          .filter(Boolean)
+          .join(" | ");
+        return minimalPdfError(m);
+      }
+    };
+
+    const lo = await getLibreOfficeCommand();
+    if (lo) {
+      try {
+        return await convertXlsxToPdfWithLibreOffice(xlsx, fileName);
+      } catch (err) {
+        return withFallback(err instanceof Error ? err.message : String(err));
+      }
+    }
+    return withFallback(
+      "LibreOffice (soffice) no esta en el PATH. PDF generado solo desde datos de la hoja.",
+    );
   } catch (e) {
     return minimalPdfError(e instanceof Error ? e.message : String(e));
   }

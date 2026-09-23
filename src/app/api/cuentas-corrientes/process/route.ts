@@ -199,6 +199,7 @@ export async function POST(request: Request) {
           const pdfBytes = await convertXlsxToPdf(
             new Uint8Array(await downloaded.data.arrayBuffer()),
             xlsxPath.split("/").pop() ?? "in.xlsx",
+            body.companyType,
           );
           const pdfPath = xlsxPath.replace(/\.xlsx$/i, ".pdf");
           const uploaded = await admin.storage.from("results").upload(pdfPath, pdfBytes, {
