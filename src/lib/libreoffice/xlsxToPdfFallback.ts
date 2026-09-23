@@ -370,8 +370,12 @@ export async function xlsxToPdfFallback(
           const chosenFont = isHeader ? fontBoldItalic : font;
           const t = fitTextToWidth(sp.text.trim(), chosenFont, size, Math.max(8, avail));
 
+          // Alinear a la derecha solo importes y numeros compactos. Los
+          // telefonos del cliente ("115 009 9010") tienen espacios
+          // internos: si se alinearan a la derecha caerian justo en la
+          // columna de saldos y se leerian como un importe.
           const isNum =
-            !isHeader && /^-?\$?\s*-?[\d.,\s]+$/.test(sp.text.trim());
+            !isHeader && /^-?\$?\s*-?[\d.,]+$/.test(sp.text.trim());
           let textX = xStart + 2;
           if (isNum) {
             try {
