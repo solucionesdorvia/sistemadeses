@@ -34,7 +34,7 @@ export async function minimalPdfError(message: string): Promise<Buffer> {
  *  Si el contenido excede una pagina, se agregan mas. */
 const PAGE_W = 595.28;
 const PAGE_H = 841.89;
-const MARGIN = 30;
+const MARGIN = 18;
 
 function truncateCell(s: string, max: number): string {
   const t = String(s).replace(/\r\n/g, " ").replace(/\s+/g, " ").trim();
@@ -55,7 +55,6 @@ export async function xlsxToPdfFallback(
 ): Promise<Buffer> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
-  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const fontBoldItalic = await pdf.embedFont(StandardFonts.HelveticaBoldOblique);
   const label = basename(fileName);
 
@@ -202,14 +201,33 @@ export async function xlsxToPdfFallback(
     // se comia el padding (el "$" de la col siguiente quedaba pegado).
     const measureUnitWidth = (text: string) => {
       try {
-        return fontBold.widthOfTextAtSize(text, 1);
+        // Con la fuente regular, que es la que se usa para los datos.
+        // Medir con la negrita reservaba ~6% de ancho de mas y obligaba
+        // al auto-fit a usar letra mas chica.
+        return font.widthOfTextAtSize(text, 1);
       } catch {
         return text.length * 0.55;
       }
     };
+    // Cuantas columnas de la grilla abarca un span.
+    const gridColsSpanned = (sp: { startCol: number; endCol: number }) => {
+      let n = 0;
+      for (const g of gridCols) if (g >= sp.startCol && g <= sp.endCol) n += 1;
+      return n;
+    };
+    // El ancho de cada columna lo definen los DATOS (fechas, comprobantes,
+    // importes). Quedan afuera los titulos "Vendedor:/Cliente:/Total:" y
+    // cualquier span que ocupe media fila o mas: son textos que en Excel
+    // se extienden sobre las celdas vacias de su derecha. Si contaran,
+    // "Cliente: 002037 ESPIGARES VERONICA ELIZABETH" inflaba la primer
+    // columna y el auto-fit tenia que bajar la letra a 5pt.
+    const wideSpanThreshold = Math.max(3, Math.ceil(gridCols.length / 2));
     const colMaxUnitW = new Map<number, number>();
     for (const spans of renderRows) {
       for (const sp of spans) {
+        if (!sp.text.trim()) continue;
+        if (isHeaderText(sp.text)) continue;
+        if (gridColsSpanned(sp) >= wideSpanThreshold) continue;
         const prev = colMaxUnitW.get(sp.startCol) ?? 0;
         colMaxUnitW.set(sp.startCol, Math.max(prev, measureUnitWidth(sp.text)));
       }
@@ -217,18 +235,18 @@ export async function xlsxToPdfFallback(
     const unitWidths = gridCols.map((g) => Math.max(colMaxUnitW.get(g) ?? 0, 1.5));
     // Padding por celda proporcional al tamano de letra: separa un span
     // del siguiente (sino "CORRIENTE" queda pegado al "$" del importe).
-    const padFor = (s: number) => Math.max(5, s * 0.9);
+    const padFor = (s: number) => Math.max(4, s * 0.55);
     const computeFit = (s: number) => {
       const pad = padFor(s);
       const widths = unitWidths.map((u) => u * s + pad);
       const sum = widths.reduce((a, b) => a + b, 0);
       return { widths, sum };
     };
-    // Buscar el size mas grande que entra (entre 5 y 12). En A4 vertical
-    // los renglones largos de cuenta corriente necesitan bajar hasta
-    // ~6pt: preferimos letra chica antes que truncar importes con "…".
+    // Buscar el size mas grande que entra (entre 5 y 20). Los vendedores
+    // leen estos PDFs desde capturas de celular, asi que la letra tiene
+    // que crecer todo lo que el ancho permita antes de conformarse.
     let size = 5;
-    for (let s = 12; s >= 5; s -= 0.5) {
+    for (let s = 20; s >= 5; s -= 0.5) {
       if (computeFit(s).sum <= contentW) {
         size = s;
         break;
@@ -237,13 +255,18 @@ export async function xlsxToPdfFallback(
     let colWidths: number[];
     const fit = computeFit(size);
     if (fit.sum <= contentW) {
-      // Entra holgado: escalar al ancho disponible para que use toda la pagina.
-      const factor = contentW / fit.sum;
-      colWidths = fit.widths.map((w) => w * factor);
+      // Ancho NATURAL de cada columna, sin estirar. Antes se escalaba al
+      // ancho de pagina y eso abria huecos enormes entre fecha,
+      // comprobante e importe: en una captura de celular los datos
+      // quedaban desparramados y costaba seguir el renglon.
+      colWidths = fit.widths;
     } else {
       // Ni con 5pt entra: escalar proporcionalmente (ultimo recurso).
       colWidths = fit.widths.map((w) => (w / fit.sum) * contentW);
     }
+    // Si sobra ancho, centrar el bloque para que no quede pegado al borde.
+    const usedW = colWidths.reduce((a, b) => a + b, 0);
+    const blockX = MARGIN + Math.max(0, (contentW - usedW) / 2);
 
     // Map startCol -> { xOffset, defaultWidth } para localizar spans.
     const colXOffset = new Map<number, number>();
@@ -258,7 +281,7 @@ export async function xlsxToPdfFallback(
     }
 
     const avgColW = contentW / Math.max(1, gridCols.length);
-    const ROW_H = size * 1.9;
+    const ROW_H = size * 1.55;
     const GAP_BEFORE_HEADER = size * 0.8;
     const rowCount = renderRows.length;
 
@@ -274,6 +297,29 @@ export async function xlsxToPdfFallback(
         if (g > startCol && g <= endCol) w += colWidths[i]!;
       }
       return w;
+    };
+
+    // Recorta por ancho REAL (medido con la fuente), no por cantidad de
+    // caracteres estimada: evita cortar de mas o dejar texto desbordado.
+    const fitTextToWidth = (
+      text: string,
+      f: typeof font,
+      s: number,
+      maxW: number,
+    ) => {
+      try {
+        if (f.widthOfTextAtSize(text, s) <= maxW) return text;
+        let lo = 0;
+        let hi = text.length;
+        while (lo < hi) {
+          const mid = Math.ceil((lo + hi) / 2);
+          if (f.widthOfTextAtSize(`${text.slice(0, mid)}…`, s) <= maxW) lo = mid;
+          else hi = mid - 1;
+        }
+        return lo > 0 ? `${text.slice(0, lo)}…` : text.slice(0, 1);
+      } catch {
+        return text;
+      }
     };
 
     let ri = 0;
@@ -293,39 +339,50 @@ export async function xlsxToPdfFallback(
         const rowBottom = yCursor - ROW_H;
         const textY = rowBottom + ROW_H * 0.3;
 
-        for (const sp of renderRows[ri]!) {
-          if (!sp.text.trim()) continue;
-          // Buscar la col de la grilla "ancla" mas cercana <= sp.startCol.
-          let anchorCol = sp.startCol;
-          if (!colXOffset.has(anchorCol)) {
-            for (let i = gridCols.length - 1; i >= 0; i -= 1) {
-              if (gridCols[i]! <= sp.startCol) {
-                anchorCol = gridCols[i]!;
-                break;
-              }
-            }
+        const anchorOf = (startCol: number) => {
+          if (colXOffset.has(startCol)) return startCol;
+          for (let i = gridCols.length - 1; i >= 0; i -= 1) {
+            if (gridCols[i]! <= startCol) return gridCols[i]!;
           }
-          const xStart = MARGIN + (colXOffset.get(anchorCol) ?? 0);
-          const w = spanRenderWidth(anchorCol, sp.endCol);
-          const cap = Math.max(8, Math.floor(w / (size * 0.55)));
-          const t = truncateCell(sp.text, cap);
+          return startCol;
+        };
+        const rowItems = renderRows[ri]!
+          .filter((sp) => sp.text.trim())
+          .sort((a, b) => a.startCol - b.startCol);
+
+        for (let k = 0; k < rowItems.length; k += 1) {
+          const sp = rowItems[k]!;
+          const anchorCol = anchorOf(sp.startCol);
+          const xStart = blockX + (colXOffset.get(anchorCol) ?? 0);
+          // Ancho de su columna: sirve para alinear numeros a la derecha
+          // manteniendo la grilla.
+          const wCol = spanRenderWidth(anchorCol, sp.endCol);
+          // Ancho realmente disponible: hasta donde arranca el proximo
+          // texto de la fila. Asi un titulo largo usa el espacio vacio de
+          // su derecha en vez de recortarse, y nunca pisa al vecino.
+          const next = rowItems[k + 1];
+          const xLimit = next
+            ? blockX + (colXOffset.get(anchorOf(next.startCol)) ?? 0)
+            : blockX + usedW;
+          const avail = Math.max(wCol, xLimit - xStart) - 4;
 
           const isHeader = isHeaderText(sp.text);
-          const isNum =
-            !isHeader && sp.text.trim() !== "" && /^-?\$?\s*-?[\d.,\s]+$/.test(sp.text.trim());
           const chosenFont = isHeader ? fontBoldItalic : font;
-          let textX = xStart + 3;
+          const t = fitTextToWidth(sp.text.trim(), chosenFont, size, Math.max(8, avail));
+
+          const isNum =
+            !isHeader && /^-?\$?\s*-?[\d.,\s]+$/.test(sp.text.trim());
+          let textX = xStart + 2;
           if (isNum) {
             try {
-              const tw = chosenFont.widthOfTextAtSize(t, size);
-              textX = xStart + w - 4 - tw;
+              textX = xStart + wCol - 3 - chosenFont.widthOfTextAtSize(t, size);
             } catch {
-              textX = xStart + w - 4 - t.length * size * 0.5;
+              textX = xStart + wCol - 3 - t.length * size * 0.5;
             }
           }
 
           page.drawText(t, {
-            x: Math.max(xStart + 2, Math.min(textX, xStart + w - 3)),
+            x: Math.max(xStart + 1, textX),
             y: textY,
             size,
             font: chosenFont,
